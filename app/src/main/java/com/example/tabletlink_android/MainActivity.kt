@@ -38,16 +38,18 @@ class MainActivity : AppCompatActivity() {
 
     fun a() {
         val socket = DatagramSocket()
-        val serverAddress = InetAddress.getByName("localhost") // WPF 서버 IP
+        val serverAddress = InetAddress.getByName("192.168.1.255") // WPF 서버 IP
         val serverPort = 12345
 
         // 메시지 전송
+        Log.d("kesa", "a: Transmit")
         val message = "Hello from Android!"
         val sendData = message.toByteArray()
         val sendPacket = DatagramPacket(sendData, sendData.size, serverAddress, serverPort)
         socket.send(sendPacket)
 
         // 서버 응답 수신
+        Log.d("kesa", "a: receive")
         val receiveData = ByteArray(1024)
         val receivePacket = DatagramPacket(receiveData, receiveData.size)
         socket.receive(receivePacket)
