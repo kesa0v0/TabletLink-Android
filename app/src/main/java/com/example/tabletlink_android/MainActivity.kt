@@ -25,6 +25,7 @@ class Network {
     var serverPort: Int
 
     val socket: DatagramSocket = DatagramSocket()
+    val receiveData = ByteArray(1024)
     var udpjob: Job? = null
 
     constructor(
@@ -72,7 +73,6 @@ class Network {
             while (true) {
                 try {
                     // 서버 응답 수신
-                    val receiveData = ByteArray(1024)
                     val receivePacket = DatagramPacket(receiveData, receiveData.size)
                     socket.receive(receivePacket)
 
