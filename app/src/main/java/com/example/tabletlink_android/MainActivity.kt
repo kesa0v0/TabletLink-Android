@@ -27,7 +27,7 @@ class MainActivity : AppCompatActivity() {
 
         Log.d("kesa", "app started")
 
-        val button = findViewById<Button>(R.id.button).setOnClickListener {
+        val button = findViewById<Button>(R.id.button).setOnClickListener   {
             CoroutineScope(Dispatchers.Default).launch {
                 val t = async(Dispatchers.IO){
                     a()
@@ -38,7 +38,7 @@ class MainActivity : AppCompatActivity() {
 
     fun a() {
         val socket = DatagramSocket()
-        val serverAddress = InetAddress.getByName("192.168.1.255") // WPF 서버 IP
+        val serverAddress = InetAddress.getByName("10.0.2.2") // WPF 서버 IP
         val serverPort = 12345
 
         // 메시지 전송
