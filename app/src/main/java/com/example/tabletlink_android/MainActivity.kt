@@ -16,7 +16,6 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 
 import java.nio.ByteBuffer
-import kotlin.math.log
 
 const val TAG = "kesa"
 
@@ -38,9 +37,11 @@ class Network {
 
     data class FrameData(
         var data: ByteArray,
-        var size: Int,
         var width: Int,
         var height: Int,
+        var frameRate: Int,
+
+        var size: Int,
         var timestamp: Long
     )
 
@@ -48,16 +49,17 @@ class Network {
         val buffer = ByteBuffer.wrap(bytes)
 
         // 데이터 역 직렬화
-        val size = buffer.int
         val width = buffer.int
         val height = buffer.int
+        val dataRate = buffer.int
+        val size = buffer.int
         val timestamp = buffer.long
 
         val dataLength = bytes.size - 4 * Integer.BYTES - Long.SIZE_BYTES
         val data = ByteArray(dataLength)
         buffer.get(data)
 
-        return FrameData(data, size, width, height, timestamp)
+        return FrameData(data, width, height, dataRate, size, timestamp)
     }
 
     fun startListen() = runBlocking {
@@ -77,7 +79,8 @@ class Network {
                     socket.receive(receivePacket)
 
                     val frameData = bytesToFrameData(receiveData);
-                    println("서버 응답: ${frameData.size}")
+                    Log.d(TAG, "data received: ${frameData.data.size.toString()} bytes")
+                    Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
                 } catch (e: Exception) {
                     Log.e(TAG, "startListen: ${e.message}")
                 }
