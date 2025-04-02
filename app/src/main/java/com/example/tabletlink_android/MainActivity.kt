@@ -21,18 +21,19 @@ const val TAG = "kesa"
 
 class Network {
     var serverAddress: InetAddress
-    var serverPort: Int
+    var receivePort: Int
 
-    val socket: DatagramSocket = DatagramSocket()
-    val receiveData = ByteArray(1024)
+    var socket: DatagramSocket? = null
+    val receiveData = ByteArray(65535)
     var udpjob: Job? = null
 
     constructor(
         serverAddress: InetAddress = InetAddress.getByName("10.0.2.2"),
-        serverPort: Int = 12345
+        serverPort: Int = 12346
     ) {
         this.serverAddress = serverAddress
-        this.serverPort = serverPort
+        this.receivePort = serverPort
+        this.socket = DatagramSocket(serverPort)
     }
 
     data class FrameData(
@@ -63,23 +64,16 @@ class Network {
     }
 
     fun startListen() = runBlocking {
-
-        // 메시지 전송
-        //        Log.d(TAG, "a: Transmit")
-        //        val message = "Hello from Android!"
-        //        val sendData = message.toByteArray()
-        //        val sendPacket = DatagramPacket(sendData, sendData.size, serverAddress, serverPort)
-        //        socket.send(sendPacket)
         udpjob = launch(Dispatchers.IO) {
             Log.d(TAG, "a: Start Receiving")
             while (true) {
                 try {
                     // 서버 응답 수신
                     val receivePacket = DatagramPacket(receiveData, receiveData.size)
-                    socket.receive(receivePacket)
+                    socket?.receive(receivePacket)
 
-                    val frameData = bytesToFrameData(receiveData);
-                    Log.d(TAG, "data received: ${frameData.data.size.toString()} bytes")
+                    val frameData = bytesToFrameData(receiveData)
+                    Log.d(TAG, "data received: ${frameData.data.size} bytes")
                     Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
                 } catch (e: Exception) {
                     Log.e(TAG, "startListen: ${e.message}")
@@ -91,8 +85,8 @@ class Network {
     fun stopListen() {
         udpjob?.cancel()
         udpjob = null
-        socket.close()
-        Log.e(TAG, "stopListen: UDP 수신 종료", )
+        socket?.close()
+        Log.e(TAG, "stopListen: UDP 수신 종료" )
     }
 }
 
@@ -110,7 +104,7 @@ class MainActivity : AppCompatActivity() {
 
         Log.d(TAG, "app started")
 
-        val button = findViewById<Button>(R.id.button).setOnClickListener {
+        findViewById<Button>(R.id.button).setOnClickListener {
             server.startListen()
         }
     }
