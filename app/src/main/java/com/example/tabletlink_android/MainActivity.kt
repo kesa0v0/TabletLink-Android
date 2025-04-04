@@ -11,31 +11,35 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 
 import java.nio.ByteBuffer
 
 const val TAG = "kesa"
 
 class Network {
-    var serverAddress: InetAddress
-    var receivePort: Int
+    companion object {
+        const val TAG = "Network"
+    }
 
-    var socket: DatagramSocket? = null
-    val receiveData = ByteArray(65535)
-    var udpjob: Job? = null
+    var serverAddress: InetAddress = InetAddress.getByName("10.0.2.2")
+    var receivePort: Int = 12346
+    var sendPort:Int = 12345
 
-    constructor(
-        serverAddress: InetAddress = InetAddress.getByName("10.0.2.2"),
-        serverPort: Int = 12346
-    ) {
+    private var receiveSocket: DatagramSocket? = null
+    private var sendSocket: DatagramSocket = DatagramSocket()
+    private val receiveData = ByteArray(65535)
+    private var udpJob: Job? = null
+
+    constructor(serverAddress: InetAddress, receivePort: Int, sendPort: Int) {
         this.serverAddress = serverAddress
-        this.receivePort = serverPort
-        this.socket = DatagramSocket(serverPort)
+        this.receivePort = receivePort
+        this.sendPort = sendPort
+        receiveSocket = DatagramSocket(receivePort)
     }
 
     data class FrameData(
@@ -65,16 +69,72 @@ class Network {
         return FrameData(data, width, height, dataRate, size, timestamp)
     }
 
-    fun startListen() = runBlocking {
-        udpjob = launch(Dispatchers.IO) {
+    fun discoverServer(onFound: (InetAddress, Int) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                sendSocket.broadcast = true
+
+                val discoveryMsg = "DISCOVER_TABLET_SERVER".toByteArray()
+                val packet = DatagramPacket(
+                    discoveryMsg,
+                    discoveryMsg.size,
+                    InetAddress.getByName("10.0.2.2"),  // TODO: 에뮬 아닐때는 이거 바꿔야함 ㅇㅇ
+                    sendPort // 서버가 듣고 있는 브로드캐스트 포트
+                )
+                sendSocket.send(packet)
+
+                // 응답 대기
+                val buf = ByteArray(1024)
+                val response = DatagramPacket(buf, buf.size)
+                receiveSocket?.soTimeout = 3000
+
+                try {
+                    receiveSocket?.receive(response)
+                    Log.d(TAG, "서버 발견: ${response.address}:${response.port}")
+                    val msg = String(response.data, 0, response.length)
+                    if (msg.startsWith("TABLET_SERVER_ACK")) {
+                        val parts = msg.split(":")
+                        val ip = InetAddress.getByName(parts[1])
+                        val port = parts[2].toInt()
+                        onFound(ip, port)
+                    }
+                } catch (e: SocketTimeoutException) {
+                    Log.w(TAG, "서버를 찾지 못함")
+                }
+
+                sendSocket.broadcast = false
+            }
+            catch (e: Exception) {
+                Log.e(TAG, "discoverServer: ${e.message}")
+            }
+
+        }
+    }
+
+    fun requestConnection() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val connectMsg = "CONNECT"
+            val packet = DatagramPacket(
+                connectMsg.toByteArray(),
+                connectMsg.length,
+                serverAddress,
+                sendPort // WPF 수신 포트
+            )
+            sendSocket.send(packet)
+            Log.d(TAG, "Sent connection request to WPF")
+        }
+    }
+
+    fun startListen() {
+        udpJob = CoroutineScope(Dispatchers.IO).launch {
             Log.d(TAG, "a: Start Receiving")
             while (true) {
                 try {
-                    // 서버 응답 수신
+                    // 서버 응답 수신 대기
                     val receivePacket = DatagramPacket(receiveData, receiveData.size)
-                    socket?.receive(receivePacket)
+                    receiveSocket?.receive(receivePacket)
 
-                    val frameData = bytesToFrameData(receiveData)
+                    val frameData = bytesToFrameData(receivePacket.data)
                     Log.d(TAG, "data received: ${frameData.data.size} bytes")
                     Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
                 } catch (e: Exception) {
@@ -84,16 +144,30 @@ class Network {
         }
     }
 
+    fun testSend(message: String) {
+        CoroutineScope(Dispatchers.IO).async {
+            val packet = DatagramPacket(
+                message.toByteArray(),
+                message.length,
+                serverAddress,
+                12345
+            )
+            sendSocket.send(packet)
+            Log.d(TAG, "send packet")
+        }
+    }
+
     fun stopListen() {
-        udpjob?.cancel()
-        udpjob = null
-        socket?.close()
+        udpJob?.cancel()
+        udpJob = null
+        sendSocket.close()
+        receiveSocket?.close()
         Log.e(TAG, "stopListen: UDP 수신 종료" )
     }
 }
 
 class MainActivity : AppCompatActivity() {
-    val server = Network()
+    val server = Network(InetAddress.getByName("10.0.2.2"), 12346, 12345)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,9 +179,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         Log.d(TAG, "app started")
+        server.startListen()
 
         findViewById<Button>(R.id.button).setOnClickListener {
-            server.startListen()
+            server.discoverServer { ip, port ->
+                Log.d(TAG, "서버 발견: $ip:$port")
+                server.serverAddress = ip
+                server.sendPort = port
+                server.testSend("Hello from Android!")
+            }
         }
     }
 
