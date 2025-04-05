@@ -195,27 +195,24 @@ class Network {
                                 receiveChannel?.receive(receiveData)
                                 receiveData.flip()
 
-                                val msg = String(receiveData.array(), 0, receiveData.limit())
-                                Log.d(TAG, "Received: $msg")
-
                                 val receivedData = ByteArray(receiveData.remaining())
                                 receiveData.get(receivedData)
 
                                 val frameData = bytesToFrameData(receivedData)
 
-                                Log.d(TAG, "data received: ${frameData.data.size} bytes")
-                                Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
+                                Log.d(TAG, "startListen: width: ${frameData.width}, height: ${frameData.height}, timestamp: ${frameData.timestamp}")
+                                Log.d(TAG, "startListen: latency: ${System.currentTimeMillis() - frameData.timestamp}")
 
                                 // 비동기 압축 해제
-                                launch(Dispatchers.Default) {
-                                    val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
-                                    val decompressedData =
-                                        decompressor.decompress(frameData.data, frameData.size)
-
-                                    withContext(Dispatchers.Main) {
-                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
-                                    }
-                                }
+//                                launch(Dispatchers.Default) {
+//                                    val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
+//                                    val decompressedData =
+//                                        decompressor.decompress(frameData.data, frameData.size)
+//
+//                                    withContext(Dispatchers.Main) {
+//                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+//                                    }
+//                                }
                             }
                         }
                     }
