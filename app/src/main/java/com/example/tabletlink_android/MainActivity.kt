@@ -1,5 +1,6 @@
 package com.example.tabletlink_android
 
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -12,13 +13,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-
+import kotlinx.coroutines.withContext
+import net.jpountz.lz4.LZ4Factory
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.SocketTimeoutException
-
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
 
 const val TAG = "kesa"
 
@@ -29,16 +33,20 @@ class Network {
     var receivePort: Int = 12346
     var sendPort:Int = 12345
 
-    private var receiveSocket: DatagramSocket? = null
-    private var sendSocket: DatagramSocket = DatagramSocket()
-    private val receiveData = ByteArray(65535)
+    private var receiveChannel: DatagramChannel?
+    private var sendSocket: DatagramSocket?
+    private val receiveData = ByteBuffer.allocate(65535)
     private var udpJob: Job? = null
 
     constructor(serverAddress: InetAddress, receivePort: Int, sendPort: Int) {
         this.serverAddress = serverAddress
         this.receivePort = receivePort
         this.sendPort = sendPort
-        receiveSocket = DatagramSocket(receivePort)
+
+        sendSocket = DatagramSocket()
+        receiveChannel = DatagramChannel.open()
+        receiveChannel?.configureBlocking(false)
+        receiveChannel?.bind(null)
     }
 
     data class FrameData(
@@ -94,66 +102,139 @@ class Network {
         return buffer.array().copyOf(buffer.position()) // 사용한 만큼만
     }
 
+    fun startServer() {
+        if (receiveChannel == null) {
+            receiveChannel = DatagramChannel.open()
+            receiveChannel?.configureBlocking(false)
+            receiveChannel?.bind(InetSocketAddress(receivePort))
+        }
+
+        if (sendSocket == null) {
+            sendSocket = DatagramSocket()
+        }
+    }
 
     fun discoverServer(onFound: (InetAddress, Int) -> Unit) {
         if (isConnected)
             return
 
+        if (receiveChannel == null) {
+            startServer()
+        }
+
         CoroutineScope(Dispatchers.IO).launch {
-            receiveSocket?.broadcast = true
-
-            var discoveryMsg = sendPacketToByte(PacketType.DISCOVER_TABLET_SERVER, null)
-            val packet = DatagramPacket(
-                discoveryMsg,
-                discoveryMsg.size,
-                InetAddress.getByName("10.0.2.2"),  // TODO: 에뮬 아닐때는 이거 바꿔야함 ㅇㅇ
-                sendPort // 서버가 듣고 있는 브로드캐스트 포트
-            )
-            receiveSocket?.send(packet)
-
-            // 응답 대기
-            val buf = ByteArray(1024)
-            val response = DatagramPacket(buf, buf.size)
-            receiveSocket?.soTimeout = 3000
-
             try {
-                receiveSocket?.receive(response)
-                val msg = String(response.data, 0, response.length)
-                if (msg.startsWith("TABLET_SERVER_ACK")) {
-                    val parts = msg.split(":")
-                    val ip = InetAddress.getByName(parts[1])
-                    val port = parts[2].toInt()
-                    onFound(ip, port)
-                }
-            } catch (e: SocketTimeoutException) {
-                Log.w(TAG, "서버를 찾지 못함")
-            }
+                val selector = Selector.open()
+                receiveChannel?.register(selector, SelectionKey.OP_READ)
 
-            sendSocket.broadcast = false
+
+                val isEmulator = true
+                val serverIp = if (isEmulator)
+                    InetAddress.getByName("10.0.2.2")
+                else
+                    InetAddress.getByName("255.255.255.255")
+
+                // 서버에 discover 메시지 전송
+                val discoveryMsg = sendPacketToByte(PacketType.DISCOVER_TABLET_SERVER, null)
+                val sendBuffer = ByteBuffer.wrap(discoveryMsg)
+                receiveChannel?.send(sendBuffer, InetSocketAddress(serverIp, sendPort))
+
+                // 서버 응답 대기
+                val timeout = 3000L
+                val startTime = System.currentTimeMillis()
+
+                while (System.currentTimeMillis() - startTime < timeout) {
+                    if (selector.select(100) > 0) {
+                        val keys = selector.selectedKeys()
+                        val it = keys.iterator()
+                        while (it.hasNext()) {
+                            val key = it.next()
+                            it.remove()
+
+                            if (key.isReadable) {
+                                receiveChannel?.receive(receiveData)
+                                receiveData.flip()
+
+                                val msg = String(receiveData.array(), 0, receiveData.limit())
+                                if (msg.startsWith("TABLET_SERVER_ACK")) {
+                                    val parts = msg.split(":")
+                                    val ip = InetAddress.getByName(parts[1])
+                                    val port = parts[2].toInt()
+                                    onFound(ip, port)
+                                    return@launch
+                                }
+                            }
+                        }
+                    }
+                }
+                Log.w(TAG, "discoverServer: No server found")
+            } catch (e: Exception) {
+                Log.e(TAG, "discoverServer: ${e.stackTraceToString()}")
+            }
         }
     }
 
     fun startListen() {
         isConnected = true
+
         udpJob = CoroutineScope(Dispatchers.IO).launch {
+            val selector = Selector.open()
+            receiveChannel?.register(selector, SelectionKey.OP_READ)
+
             Log.d(TAG, "a: Start Receiving")
             while (isConnected) {
                 try {
-                    // 서버 응답 수신 대기
-                    val receivePacket = DatagramPacket(receiveData, receiveData.size)
-                    receiveSocket?.receive(receivePacket)
+                    if (selector.select(5) > 0) {
+                        val keys = selector.selectedKeys()
+                        val it = keys.iterator()
+                        while (it.hasNext()) {
+                            val key = it.next()
+                            it.remove()
 
-                    val frameData = bytesToFrameData(receivePacket.data)
-                    Log.d(TAG, "data received: ${frameData.data.size} bytes")
-                    Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
+                            if (key.isReadable) {
+                                receiveChannel?.receive(receiveData)
+                                receiveData.flip()
+
+                                val msg = String(receiveData.array(), 0, receiveData.limit())
+                                Log.d(TAG, "Received: $msg")
+
+                                val receivedData = ByteArray(receiveData.remaining())
+                                receiveData.get(receivedData)
+
+                                val frameData = bytesToFrameData(receivedData)
+
+                                Log.d(TAG, "data received: ${frameData.data.size} bytes")
+                                Log.d(TAG, "latency: ${System.currentTimeMillis() - frameData.timestamp} ms")
+
+                                // 비동기 압축 해제
+                                launch(Dispatchers.Default) {
+                                    val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
+                                    val decompressedData =
+                                        decompressor.decompress(frameData.data, frameData.size)
+
+                                    withContext(Dispatchers.Main) {
+                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                 } catch (e: Exception) {
-                    Log.e(TAG, "startListen: ${e.message}")
+                    Log.e(TAG, "startListen: ${e.stackTraceToString()}")
                 }
             }
         }
     }
 
+    private fun CoroutineScope.updateScreen(screenData: Any, width: Int, height: Int, timestamp: Long) {
+        Log.d(TAG, "updateScreen: width: $width, height: $height, timestamp: $timestamp")
+    }
+
     fun testSend() {
+        if (sendSocket == null) {
+            sendSocket = DatagramSocket()
+        }
         var sendData = sendPacketToByte(PacketType.PEN_INPUT, PenData(0, 0, 0,
             System.currentTimeMillis()))
         CoroutineScope(Dispatchers.IO).async {
@@ -163,7 +244,7 @@ class Network {
                 serverAddress,
                 sendPort
             )
-            sendSocket.send(packet)
+            sendSocket?.send(packet)
             Log.d(TAG, "send packet")
         }
     }
@@ -172,9 +253,11 @@ class Network {
         isConnected = false
         udpJob?.cancel()
         udpJob = null
-        sendSocket.close()
-        receiveSocket?.close()
-        Log.e(TAG, "stopListen: UDP 수신 종료" )
+        sendSocket?.close()
+        sendSocket = null
+        receiveChannel?.close()
+        receiveChannel = null
+        Log.d(TAG, "stopListen: UDP 수신 종료" )
     }
 }
 
