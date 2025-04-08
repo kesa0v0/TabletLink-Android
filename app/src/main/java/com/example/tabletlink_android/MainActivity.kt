@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import net.jpountz.lz4.LZ4Factory
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -223,15 +225,15 @@ class Network {
                                 )
 
                                 // 비동기 압축 해제
-//                                launch(Dispatchers.Default) {
-//                                    val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
-//                                    val decompressedData =
-//                                        decompressor.decompress(frameData.data, frameData.size)
-//
-//                                    withContext(Dispatchers.Main) {
-//                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
-//                                    }
-//                                }
+                                launch(Dispatchers.Default) {
+                                    val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
+                                    val decompressedData =
+                                        decompressor.decompress(frameData.data, frameData.size)
+
+                                    withContext(Dispatchers.Main) {
+                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+                                    }
+                                }
                             }
                         }
                     }
@@ -243,6 +245,7 @@ class Network {
         }
     }
 
+    var previousFrame: ByteArray = ByteArray(0)
     private fun CoroutineScope.updateScreen(
         screenData: Any,
         width: Int,
@@ -250,6 +253,16 @@ class Network {
         timestamp: Long
     ) {
         Log.d(TAG, "updateScreen: width: $width, height: $height, timestamp: $timestamp")
+
+
+        // previousFrame: byte[] 형태로 이전 프레임의 raw pixel data
+// xorDelta: byte[] 형태로 WPF에서 보낸 XOR delta 데이터
+        val newFrame = ByteArray(previousFrame.length)
+
+        for (i in 0 until previousFrame.length) {
+            newFrame[i] = (previousFrame[i] xor xorDelta[i]) as Byte
+        }
+
     }
 
     fun testSend() {
