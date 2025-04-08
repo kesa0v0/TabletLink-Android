@@ -1,6 +1,5 @@
 package com.example.tabletlink_android
 
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -13,8 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import net.jpountz.lz4.LZ4Factory
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -26,12 +23,20 @@ import java.nio.channels.Selector
 
 const val TAG = "kesa"
 
+enum class NetworkStatus {
+    NO_SERVER,
+    TIMEOUT,
+    ALREADY_CONNECTED,
+    UNKNOWN,
+    SUCCESS
+}
+
 class Network {
     var isConnected = false
 
     var serverAddress: InetAddress = InetAddress.getByName("10.0.2.2")
     var receivePort: Int = 12346
-    var sendPort:Int = 12345
+    var sendPort: Int = 12345
 
     private var receiveChannel: DatagramChannel?
     private var sendSocket: DatagramSocket?
@@ -114,7 +119,7 @@ class Network {
         }
     }
 
-    fun discoverServer(onFound: (InetAddress, Int) -> Unit) {
+    fun discoverServer() {
         if (isConnected)
             return
 
@@ -160,7 +165,7 @@ class Network {
                                     val parts = msg.split(":")
                                     val ip = InetAddress.getByName(parts[1])
                                     val port = parts[2].toInt()
-                                    onFound(ip, port)
+                                    onDiscovered(ip, port)
                                     return@launch
                                 }
                             }
@@ -172,6 +177,13 @@ class Network {
                 Log.e(TAG, "discoverServer: ${e.stackTraceToString()}")
             }
         }
+    }
+
+    fun onDiscovered(ip: InetAddress, port: Int) {
+        Log.d(TAG, "서버 발견: $ip:$port")
+        this.serverAddress = ip
+        this.sendPort = port
+        startListen()
     }
 
     fun startListen() {
@@ -192,6 +204,7 @@ class Network {
                             it.remove()
 
                             if (key.isReadable) {
+                                receiveData.clear()
                                 receiveChannel?.receive(receiveData)
                                 receiveData.flip()
 
@@ -200,8 +213,14 @@ class Network {
 
                                 val frameData = bytesToFrameData(receivedData)
 
-                                Log.d(TAG, "startListen: width: ${frameData.width}, height: ${frameData.height}, timestamp: ${frameData.timestamp}")
-                                Log.d(TAG, "startListen: latency: ${System.currentTimeMillis() - frameData.timestamp}")
+                                Log.d(
+                                    TAG,
+                                    "startListen: width: ${frameData.width}, height: ${frameData.height}, timestamp: ${frameData.timestamp}"
+                                )
+                                Log.d(
+                                    TAG,
+                                    "startListen: latency: ${System.currentTimeMillis() - frameData.timestamp}"
+                                )
 
                                 // 비동기 압축 해제
 //                                launch(Dispatchers.Default) {
@@ -224,7 +243,12 @@ class Network {
         }
     }
 
-    private fun CoroutineScope.updateScreen(screenData: Any, width: Int, height: Int, timestamp: Long) {
+    private fun CoroutineScope.updateScreen(
+        screenData: Any,
+        width: Int,
+        height: Int,
+        timestamp: Long
+    ) {
         Log.d(TAG, "updateScreen: width: $width, height: $height, timestamp: $timestamp")
     }
 
@@ -232,8 +256,12 @@ class Network {
         if (sendSocket == null) {
             sendSocket = DatagramSocket()
         }
-        var sendData = sendPacketToByte(PacketType.PEN_INPUT, PenData(0, 0, 0,
-            System.currentTimeMillis()))
+        var sendData = sendPacketToByte(
+            PacketType.PEN_INPUT, PenData(
+                0, 0, 0,
+                System.currentTimeMillis()
+            )
+        )
         CoroutineScope(Dispatchers.IO).async {
             val packet = DatagramPacket(
                 sendData,
@@ -254,7 +282,7 @@ class Network {
         sendSocket = null
         receiveChannel?.close()
         receiveChannel = null
-        Log.d(TAG, "stopListen: UDP 수신 종료" )
+        Log.d(TAG, "stopListen: UDP 수신 종료")
     }
 }
 
@@ -278,15 +306,9 @@ class MainActivity : AppCompatActivity() {
 
         val s = findViewById<SwitchCompat>(R.id.switch1)
         s.setOnClickListener {
-            if (s.isChecked)
-            server.discoverServer { ip, port ->
-                Log.d(TAG, "서버 발견: $ip:$port")
-                server.serverAddress = ip
-                server.sendPort = port
-                server.startListen()
-            }
-            else
-            {
+            if (s.isChecked) {
+                server.discoverServer()
+            } else {
                 server.stopListen()
             }
         }
@@ -296,5 +318,4 @@ class MainActivity : AppCompatActivity() {
         server.stopListen()
         super.onDestroy()
     }
-
 }
