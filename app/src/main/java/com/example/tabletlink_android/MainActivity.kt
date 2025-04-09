@@ -1,8 +1,12 @@
 package com.example.tabletlink_android
 
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.widget.Button
+import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.ViewCompat
@@ -23,15 +27,8 @@ import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 
-const val TAG = "kesa"
 
-enum class NetworkStatus {
-    NO_SERVER,
-    TIMEOUT,
-    ALREADY_CONNECTED,
-    UNKNOWN,
-    SUCCESS
-}
+const val TAG = "kesa"
 
 class Network {
     var isConnected = false
@@ -231,7 +228,7 @@ class Network {
                                         decompressor.decompress(frameData.data, frameData.size)
 
                                     withContext(Dispatchers.Main) {
-                                        updateScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+                                        xorScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
                                     }
                                 }
                             }
@@ -245,8 +242,9 @@ class Network {
         }
     }
 
-    var previousFrame: ByteArray = ByteArray(0)
-    private fun CoroutineScope.updateScreen(
+    var previousFrame: ByteArray = ByteArray(1920 * 1080 * 4) // 초기화
+    var onFrameUpdated: ((Bitmap) -> Unit)? = null
+    private fun CoroutineScope.xorScreen(
         screenData: Any,
         width: Int,
         height: Int,
@@ -254,15 +252,18 @@ class Network {
     ) {
         Log.d(TAG, "updateScreen: width: $width, height: $height, timestamp: $timestamp")
 
+        val newFrame = ByteArray(previousFrame.size)
 
-        // previousFrame: byte[] 형태로 이전 프레임의 raw pixel data
-// xorDelta: byte[] 형태로 WPF에서 보낸 XOR delta 데이터
-        val newFrame = ByteArray(previousFrame.length)
+        Utils.xorFrames(newFrame, previousFrame, screenData as ByteArray)
+        previousFrame = screenData
 
-        for (i in 0 until previousFrame.length) {
-            newFrame[i] = (previousFrame[i] xor xorDelta[i]) as Byte
-        }
+        // Bitmap 생성
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val buffer = ByteBuffer.wrap(newFrame)
+        bmp.copyPixelsFromBuffer(buffer)
 
+        // 최신 프레임을 MainActivity에 전달
+        onFrameUpdated?.invoke(bmp)
     }
 
     fun testSend() {
@@ -302,6 +303,10 @@ class Network {
 class MainActivity : AppCompatActivity() {
     val server = Network(InetAddress.getByName("10.0.2.2"), 12346, 12345)
 
+    private lateinit var imageView: ImageView
+    @Volatile
+    var latestFrame: Bitmap? = null // SingleBuffer Frame
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -312,6 +317,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         Log.d(TAG, "app started")
+
+        imageView = findViewById(R.id.imageView)
+
+        // ImageView UI Update
+        val handler = Handler(Looper.getMainLooper())
+        val updater = object : Runnable {
+            override fun run() {
+                latestFrame?.let { bitmap ->
+                    imageView.setImageBitmap(bitmap)
+                }
+                handler.postDelayed(this, 16) // 60 FPS
+            }
+        }
+        handler.post(updater)
+
+        server.onFrameUpdated = { bitmap ->
+            latestFrame = bitmap
+        }
+
 
         findViewById<Button>(R.id.button).setOnClickListener {
             server.testSend()
