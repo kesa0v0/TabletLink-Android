@@ -26,6 +26,8 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
+import androidx.core.graphics.createBitmap
+import java.nio.Buffer
 
 
 const val TAG = "kesa"
@@ -224,11 +226,12 @@ class Network {
                                 // 비동기 압축 해제
                                 launch(Dispatchers.Default) {
                                     val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
-                                    val decompressedData =
+//                                    val decompressedData =
                                         decompressor.decompress(frameData.data, frameData.size)
 
                                     withContext(Dispatchers.Main) {
-                                        xorScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+//                                        xorScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
+                                        xorScreen(frameData, frameData.width, frameData.height, frameData.timestamp)
                                     }
                                 }
                             }
@@ -254,13 +257,14 @@ class Network {
 
         val newFrame = ByteArray(previousFrame.size)
 
-        Utils.xorFrames(newFrame, previousFrame, screenData as ByteArray)
-        previousFrame = screenData
+//        Utils.xorFrames(newFrame, previousFrame, screenData as ByteArray)
+//        previousFrame = screenData
 
         // Bitmap 생성
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bmp = createBitmap(width, height)
         val buffer = ByteBuffer.wrap(newFrame)
-        bmp.copyPixelsFromBuffer(buffer)
+//        bmp.copyPixelsFromBuffer(buffer)
+        bmp.copyPixelsFromBuffer(screenData as Buffer)
 
         // 최신 프레임을 MainActivity에 전달
         onFrameUpdated?.invoke(bmp)
