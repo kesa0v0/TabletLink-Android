@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.SurfaceView
 import android.widget.Button
 import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
@@ -226,8 +227,7 @@ class Network {
                                 // 비동기 압축 해제
                                 launch(Dispatchers.Default) {
                                     val decompressor = LZ4Factory.fastestInstance().fastDecompressor()
-//                                    val decompressedData =
-                                        decompressor.decompress(frameData.data, frameData.size)
+//                                    val decompressedData = decompressor.decompress(frameData.data, frameData.size)
 
                                     withContext(Dispatchers.Main) {
 //                                        xorScreen(decompressedData, frameData.width, frameData.height, frameData.timestamp)
@@ -245,29 +245,26 @@ class Network {
         }
     }
 
-    var previousFrame: ByteArray = ByteArray(1920 * 1080 * 4) // 초기화
+//    var previousFrame: ByteArray = ByteArray(1920 * 1080 * 4) // 초기화
     var onFrameUpdated: ((Bitmap) -> Unit)? = null
     private fun CoroutineScope.xorScreen(
-        screenData: Any,
+        screenData: FrameData,
         width: Int,
         height: Int,
         timestamp: Long
     ) {
         Log.d(TAG, "updateScreen: width: $width, height: $height, timestamp: $timestamp")
 
-        val newFrame = ByteArray(previousFrame.size)
+//        val newFrame = ByteArray(previousFrame.size)
 
 //        Utils.xorFrames(newFrame, previousFrame, screenData as ByteArray)
 //        previousFrame = screenData
 
         // Bitmap 생성
         val bmp = createBitmap(width, height)
-        val buffer = ByteBuffer.wrap(newFrame)
-//        bmp.copyPixelsFromBuffer(buffer)
-        bmp.copyPixelsFromBuffer(screenData as Buffer)
+        bmp.copyPixelsFromBuffer(ByteBuffer.wrap(screenData.data))
 
-        // 최신 프레임을 MainActivity에 전달
-        onFrameUpdated?.invoke(bmp)
+
     }
 
     fun testSend() {
@@ -307,10 +304,6 @@ class Network {
 class MainActivity : AppCompatActivity() {
     val server = Network(InetAddress.getByName("10.0.2.2"), 12346, 12345)
 
-    private lateinit var imageView: ImageView
-    @Volatile
-    var latestFrame: Bitmap? = null // SingleBuffer Frame
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -322,23 +315,10 @@ class MainActivity : AppCompatActivity() {
 
         Log.d(TAG, "app started")
 
-        imageView = findViewById(R.id.imageView)
+        val surfaceView = findViewById<SurfaceView>(R.id.surfaceView)
+        val surfaceHolder = surfaceView.holder
 
-        // ImageView UI Update
-        val handler = Handler(Looper.getMainLooper())
-        val updater = object : Runnable {
-            override fun run() {
-                latestFrame?.let { bitmap ->
-                    imageView.setImageBitmap(bitmap)
-                }
-                handler.postDelayed(this, 16) // 60 FPS
-            }
-        }
-        handler.post(updater)
 
-        server.onFrameUpdated = { bitmap ->
-            latestFrame = bitmap
-        }
 
 
         findViewById<Button>(R.id.button).setOnClickListener {
