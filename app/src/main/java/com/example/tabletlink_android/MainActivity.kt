@@ -3,6 +3,7 @@ package com.example.tabletlink_android
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
+import android.view.MotionEvent
 import android.view.SurfaceView
 import android.widget.Button
 import androidx.appcompat.app.AppCompatActivity
@@ -29,6 +30,18 @@ import androidx.core.graphics.createBitmap
 
 const val TAG = "kesa"
 
+
+data class PenData(
+    var x: Float,
+    var y: Float,
+    var pressure: Float,
+    var orientation: Float,
+    var tilt: Float,
+    var distance: Float,
+
+    var timestamp: Long
+)
+
 class Network {
     var isConnected = false
 
@@ -37,7 +50,7 @@ class Network {
     var sendPort: Int = 12345
 
     private var receiveChannel: DatagramChannel?
-    private var sendSocket: DatagramSocket?
+    var sendSocket: DatagramSocket?
     private val receiveData = ByteBuffer.allocate(65535)
     private var udpJob: Job? = null
 
@@ -65,12 +78,6 @@ class Network {
         var timestamp: Long
     )
 
-    data class PenData(
-        var x: Int,
-        var y: Int,
-        var pressure: Int,
-        var timestamp: Long
-    )
 
     fun bytesToFrameData(bytes: ByteArray): FrameData {
         val buffer = ByteBuffer.wrap(bytes)
@@ -99,9 +106,13 @@ class Network {
         buffer.put(type.id)  // 1 byte
 
         data?.let {
-            buffer.putInt(it.x)
-            buffer.putInt(it.y)
-            buffer.putInt(it.pressure)
+            buffer.putFloat(it.x)
+            buffer.putFloat(it.y)
+            buffer.putFloat(it.pressure)
+            buffer.putFloat(it.orientation)
+            buffer.putFloat(it.tilt)
+            buffer.putFloat(it.distance)
+
             buffer.putLong(it.timestamp)
         }
 
@@ -273,7 +284,7 @@ class Network {
         }
         var sendData = sendPacketToByte(
             PacketType.PEN_INPUT, PenData(
-                0, 0, 0,
+                0f, 0f, 0f, 0f, 0f, 0f,
                 System.currentTimeMillis()
             )
         )
@@ -336,10 +347,45 @@ class MainActivity : AppCompatActivity() {
                 server.stopListen()
             }
         }
+
     }
 
     override fun onDestroy() {
         server.stopListen()
         super.onDestroy()
+    }
+
+    override fun onTouchEvent(event: MotionEvent?): Boolean {
+        if (event == null) return false
+
+        val toolType = event.getToolType(0)
+
+        if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
+            Log.d(TAG, "onTouchEvent: toolType: $toolType")
+
+            val x = event.getX(0)
+            val y = event.getY(0)
+            val pressure = event.getPressure(0)
+            val orientation = event.getOrientation(0)
+            val tilt = event.getAxisValue(MotionEvent.AXIS_TILT, 0)
+            val distance = event.getAxisValue(MotionEvent.AXIS_DISTANCE, 0)
+            val timestamp = System.currentTimeMillis()
+
+            val penData = PenData(x, y, pressure, orientation, tilt, distance, timestamp)
+            val sendData = server.sendPacketToByte(Network.PacketType.PEN_INPUT, penData)
+
+            CoroutineScope(Dispatchers.IO).launch {
+                val packet = DatagramPacket(
+                    sendData,
+                    sendData.size,
+                    server.serverAddress,
+                    server.sendPort
+                )
+                server.sendSocket?.send(packet)
+                Log.d(TAG, "send packet")
+            }
+        }
+
+        return super.onTouchEvent(event)
     }
 }
