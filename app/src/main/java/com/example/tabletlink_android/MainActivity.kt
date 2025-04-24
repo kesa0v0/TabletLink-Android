@@ -2,12 +2,9 @@ package com.example.tabletlink_android
 
 import android.graphics.Bitmap
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.SurfaceView
 import android.widget.Button
-import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.ViewCompat
@@ -28,7 +25,6 @@ import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 import androidx.core.graphics.createBitmap
-import java.nio.Buffer
 
 
 const val TAG = "kesa"
@@ -44,6 +40,9 @@ class Network {
     private var sendSocket: DatagramSocket?
     private val receiveData = ByteBuffer.allocate(65535)
     private var udpJob: Job? = null
+
+    var surfaceView: SurfaceView? = null
+    var bitmap: Bitmap? = null
 
     constructor(serverAddress: InetAddress, receivePort: Int, sendPort: Int) {
         this.serverAddress = serverAddress
@@ -185,7 +184,6 @@ class Network {
         Log.d(TAG, "서버 발견: $ip:$port")
         this.serverAddress = ip
         this.sendPort = port
-        startListen()
     }
 
     fun startListen() {
@@ -246,7 +244,6 @@ class Network {
     }
 
 //    var previousFrame: ByteArray = ByteArray(1920 * 1080 * 4) // 초기화
-    var onFrameUpdated: ((Bitmap) -> Unit)? = null
     private fun CoroutineScope.xorScreen(
         screenData: FrameData,
         width: Int,
@@ -264,7 +261,10 @@ class Network {
         val bmp = createBitmap(width, height)
         bmp.copyPixelsFromBuffer(ByteBuffer.wrap(screenData.data))
 
-
+        surfaceView?.holder?.lockCanvas()?.let { canvas ->
+            canvas.drawBitmap(bmp, 0f, 0f, null)
+            surfaceView?.holder?.unlockCanvasAndPost(canvas)
+        }
     }
 
     fun testSend() {
@@ -317,18 +317,21 @@ class MainActivity : AppCompatActivity() {
 
         val surfaceView = findViewById<SurfaceView>(R.id.surfaceView)
         val surfaceHolder = surfaceView.holder
+        server.surfaceView = surfaceView
 
 
+        findViewById<Button>(R.id.Discover).setOnClickListener {
+            server.discoverServer()
+        }
 
-
-        findViewById<Button>(R.id.button).setOnClickListener {
+        findViewById<Button>(R.id.SendPen).setOnClickListener {
             server.testSend()
         }
 
         val s = findViewById<SwitchCompat>(R.id.switch1)
         s.setOnClickListener {
             if (s.isChecked) {
-                server.discoverServer()
+                server.startListen()
             } else {
                 server.stopListen()
             }
