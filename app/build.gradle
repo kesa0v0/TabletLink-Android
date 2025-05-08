@@ -31,12 +31,6 @@ android {
         jvmTarget = '1.8'
     }
 
-    externalNativeBuild {
-        cmake {
-            path file('src/main/cpp/CMakeLists.txt')
-            version '3.22.1'
-        }
-    }
 }
 
 dependencies {
@@ -46,7 +40,11 @@ dependencies {
     implementation 'com.google.android.material:material:1.5.0'
     implementation 'androidx.activity:activity:1.8.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    implementation 'org.lz4:lz4-java:1.8.0'
+
+
+    implementation 'io.github.thibaultbee.srtdroid:srtdroid-core:1.9.1'
+    implementation 'io.github.thibaultbee.srtdroid:srtdroid-ktx:1.9.1'
+
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.3'
