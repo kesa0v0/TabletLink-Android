@@ -10,8 +10,8 @@
 
     <SurfaceView
         android:id="@+id/surfaceView"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -41,6 +41,7 @@
         android:id="@+id/switch1"
         android:layout_width="140dp"
         android:layout_height="60dp"
+        android:backgroundTint="#00BCD4"
         android:text="Switch"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintHorizontal_bias="0.498"
