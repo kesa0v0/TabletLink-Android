@@ -1,6 +1,5 @@
 package com.example.tabletlink_android
 
-import android.graphics.Bitmap
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
@@ -15,9 +14,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import io.github.thibaultbee.srtdroid.core.Srt
-import io.github.thibaultbee.streampack.core.elements.endpoints.DynamicEndpointFactory
-import io.github.thibaultbee.streampack.core.pipelines.StreamerPipeline
-import io.github.thibaultbee.streampack.ui.views.PreviewView
+import io.github.thibaultbee.srtdroid.core.models.SrtSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +28,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
+import kotlin.concurrent.thread
 
 
 const val TAG = "kesa"
@@ -58,9 +56,6 @@ class Network {
     var sendSocket: DatagramSocket?
     private val receiveData = ByteBuffer.allocate(65535)
     private var udpJob: Job? = null
-
-    var surfaceView: SurfaceView? = null
-    var bitmap: Bitmap? = null
 
     constructor(serverAddress: InetAddress, receivePort: Int, sendPort: Int) {
         this.serverAddress = serverAddress
@@ -224,8 +219,22 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        Srt.
+        Srt.startUp()
+        surfaceView = findViewById<SurfaceView>(R.id.surfaceView)
+        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                surface = holder.surface
+                startStreaming()
+            }
 
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                // SurfaceView 크기 변경 시 처리
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                // SurfaceView 파괴 시 처리
+            }
+        })
 
         findViewById<Button>(R.id.Discover).setOnClickListener {
             server.discoverServer()
@@ -246,12 +255,53 @@ class MainActivity : AppCompatActivity() {
 
     }
 
+    private fun startStreaming() {
+        thread {
+            val serverSocket = SrtSocket()
+            serverSocket.bind(InetSocketAddress(1234))
+            serverSocket.listen(1)
+            val client = serverSocket.accept()
+            val inputStream = client.first.getInputStream()
+
+            // 미리 설정된 H.264 스트림 포맷 (적절히 조정)
+            val format = MediaFormat.createVideoFormat("video/avc", 1280, 720)
+            codec = MediaCodec.createDecoderByType("video/avc")
+            codec.configure(format, surface, null, 0)
+            codec.start()
+
+            val buffer = ByteArray(4096)
+            var read: Int
+
+            while (true) {
+                read = inputStream.read(buffer)
+                if (read <= 0) break
+
+                val inIndex = codec.dequeueInputBuffer(10000)
+                if (inIndex >= 0) {
+                    val inputBuffer = codec.getInputBuffer(inIndex)!!
+                    inputBuffer.clear()
+                    inputBuffer.put(buffer, 0, read)
+                    codec.queueInputBuffer(inIndex, 0, read, System.nanoTime() / 1000, 0)
+                }
+
+                val outIndex = codec.dequeueOutputBuffer(MediaCodec.BufferInfo(), 10000)
+                if (outIndex >= 0) {
+                    codec.releaseOutputBuffer(outIndex, true)
+                }
+            }
+
+            inputStream.close()
+            client.first.close()
+            serverSocket.close()
+        }
+    }
     override fun onDestroy() {
         server.stopListen()
         super.onDestroy()
-        CoroutineScope(Dispatchers.IO).launch {
-            streamer.stopStream()
-        }
+
+        Srt.cleanUp()
+        codec.stop()
+        codec.release()
     }
 
     override fun onTouchEvent(event: MotionEvent?): Boolean {
