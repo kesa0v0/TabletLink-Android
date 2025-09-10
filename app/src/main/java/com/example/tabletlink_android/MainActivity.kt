@@ -1,177 +1,116 @@
 package com.example.tabletlink_android
 
-import android.media.MediaCodec
-import android.media.MediaFormat
+import android.annotation.SuppressLint
 import android.os.Bundle
-import android.util.Log
 import android.view.MotionEvent
-import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.SwitchCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import io.github.thibaultbee.srtdroid.core.Srt
-import io.github.thibaultbee.srtdroid.core.models.SrtSocket
-import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.net.DatagramPacket
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import kotlin.concurrent.thread
+import kotlinx.coroutines.withContext
+import java.io.PrintWriter
+import java.net.Socket
 
 
 const val TAG = "kesa"
 
 
 class MainActivity : AppCompatActivity() {
-    val server = Network(InetAddress.getByName("10.0.2.2"), 12346, 12345)
-    private lateinit var surfaceView: SurfaceView
-    private lateinit var codec: MediaCodec
-    private lateinit var surface: Surface
+    private val PORT = 54321 // PC 서버와 동일한 포트
+    private var writer: PrintWriter? = null
+    private var socket: Socket? = null
 
+    private lateinit var ipAddressInput: EditText
+    private lateinit var connectButton: Button
+    private lateinit var statusText: TextView
+    private lateinit var drawingSurface: FrameLayout
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
-            insets
-        }
 
-        Srt.startUp()
-        surfaceView = findViewById<SurfaceView>(R.id.surfaceView)
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                surface = holder.surface
-            }
+        ipAddressInput = findViewById(R.id.ipAddressInput)
+        connectButton = findViewById(R.id.connectButton)
+        statusText = findViewById(R.id.statusText)
+        drawingSurface = findViewById(R.id.drawingSurface)
 
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                // SurfaceView 크기 변경 시 처리
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // SurfaceView 파괴 시 처리
-            }
-        })
-
-        findViewById<Button>(R.id.Discover).setOnClickListener {
-            server.discoverServer()
-        }
-
-        findViewById<Button>(R.id.SendPen).setOnClickListener {
-            server.testSend()
-        }
-
-        val s = findViewById<SwitchCompat>(R.id.switch1)
-        s.setOnClickListener {
-            if (s.isChecked) {
-                try {
-                    startStreaming()
-                }
-                catch (e: Exception) {
-                    Log.e(TAG, "Error starting streaming: ${e.message}")
-                    s.isChecked = false
-                }
-            } else {
-                server.stopListen()
+        connectButton.setOnClickListener {
+            val ipAddress = ipAddressInput.text.toString()
+            if (ipAddress.isNotEmpty()) {
+                connectToServer(ipAddress)
             }
         }
 
-        findViewById<TextView>(R.id.ipView).text = server.getLocalIpAddress()
+        // 터치 이벤트를 감지하여 서버로 전송
+        drawingSurface.setOnTouchListener { _, event ->
+            handleTouchEvent(event)
+            true // 이벤트를 소비했음을 알림
+        }
     }
 
-
-    private fun startStreaming() {
-        thread {
+    private fun connectToServer(ip: String) {
+        // 네트워크 작업은 메인 스레드에서 할 수 없으므로 코루틴 사용
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val serverSocket = SrtSocket()
-                serverSocket.connect(InetSocketAddress("127.0.0.1", 12345))
-                val inputStream = serverSocket.getInputStream()
-
-                // 미리 설정된 H.264 스트림 포맷 (적절히 조정)
-                val format = MediaFormat.createVideoFormat("video/avc", 1280, 720)
-                codec = MediaCodec.createDecoderByType("video/avc")
-                codec.configure(format, surface, null, 0)
-                codec.start()
-
-                val buffer = ByteArray(4096)
-                var read: Int
-
-                while (true) {
-                    read = inputStream.read(buffer)
-                    if (read <= 0) break
-
-                    val inIndex = codec.dequeueInputBuffer(10000)
-                    if (inIndex >= 0) {
-                        val inputBuffer = codec.getInputBuffer(inIndex)!!
-                        inputBuffer.clear()
-                        inputBuffer.put(buffer, 0, read)
-                        codec.queueInputBuffer(inIndex, 0, read, System.nanoTime() / 1000, 0)
-                    }
-
-                    val outIndex = codec.dequeueOutputBuffer(MediaCodec.BufferInfo(), 10000)
-                    if (outIndex >= 0) {
-                        codec.releaseOutputBuffer(outIndex, true)
-                    }
+                // 소켓을 생성하고 connect 메소드를 사용하여 timeout 설정
+                socket = Socket()
+                socket?.connect(java.net.InetSocketAddress(ip, PORT), 5000) // 5000ms = 5초 timeout
+                writer = PrintWriter(socket!!.getOutputStream(), true)
+                withContext(Dispatchers.Main) {
+                    statusText.text = "연결됨: $ip"
                 }
-
-                inputStream.close()
-                serverSocket.close()
-
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    statusText.text = "연결 실패: ${e.message}"
+                }
             }
-            catch (e: Exception) {
+        }
+    }
+
+    private fun handleTouchEvent(event: MotionEvent) {
+        val toolType = event.getToolType(0)
+        if (toolType != MotionEvent.TOOL_TYPE_STYLUS) {
+            // 스타일러스가 아닌 경우 무시
+            return
+        }
+
+        // 연결된 상태일 때만 데이터 전송
+        writer?.let {
+            val action = when (event.action) {
+                MotionEvent.ACTION_DOWN -> "DOWN"
+                MotionEvent.ACTION_MOVE -> "MOVE"
+                MotionEvent.ACTION_UP -> "UP"
+                else -> return
+            }
+            val x = event.x
+            val y = event.y
+            val pressure = event.pressure // 필압 정보
+
+            val dataString = "$action:$x,$y,$pressure"
+
+            // 데이터 전송도 네트워크 작업이므로 IO 스레드에서 처리
+            lifecycleScope.launch(Dispatchers.IO) {
+                it.println(dataString)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // 앱 종료 시 소켓 연결 해제
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                writer?.close()
+                socket?.close()
+            } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
-    }
-    override fun onDestroy() {
-        server.stopListen()
-        super.onDestroy()
-
-        Srt.cleanUp()
-        if (::codec.isInitialized) {
-            codec.stop()
-            codec.release()
-        }
-    }
-
-    override fun onTouchEvent(event: MotionEvent?): Boolean {
-        if (event == null) return false
-
-        val toolType = event.getToolType(0)
-
-        if (toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER) {
-            Log.d(TAG, "onTouchEvent: toolType: $toolType")
-
-            val x = event.getX(0)
-            val y = event.getY(0)
-            val pressure = event.getPressure(0)
-            val orientation = event.getOrientation(0)
-            val tilt = event.getAxisValue(MotionEvent.AXIS_TILT, 0)
-            val distance = event.getAxisValue(MotionEvent.AXIS_DISTANCE, 0)
-            val timestamp = System.currentTimeMillis()
-
-            val penData = PenData(x, y, pressure, orientation, tilt, distance, timestamp)
-            val sendData = server.sendPacketToByte(Network.PacketType.PEN_INPUT, penData)
-
-            CoroutineScope(Dispatchers.IO).launch {
-                val packet = DatagramPacket(
-                    sendData,
-                    sendData.size,
-                    server.serverAddress,
-                    server.sendPort
-                )
-                server.sendSocket?.send(packet)
-                Log.d(TAG, "send packet")
-            }
-        }
-
-        return super.onTouchEvent(event)
     }
 }
