@@ -1,6 +1,7 @@
 package com.example.tabletlink_android
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Bundle
 import android.util.DisplayMetrics
 import android.view.Display
@@ -65,20 +66,12 @@ class MainActivity : AppCompatActivity() {
                 socket?.connect(java.net.InetSocketAddress(ip, PORT), 5000) // 5000ms = 5초 timeout
                 writer = PrintWriter(socket!!.getOutputStream(), true)
 
-                // 디바이스 정보 가져오기
-                val displayMetrics = DisplayMetrics()
-                @Suppress("DEPRECATION") // For older API levels
-                val display: Display? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    getDisplay()
-                } else {
-                    windowManager.defaultDisplay
-                }
-                display?.getRealMetrics(displayMetrics)
-                val width = displayMetrics.widthPixels
-                val height = displayMetrics.heightPixels
-                val refreshRate = display?.refreshRate?.toInt() ?: 60 // 기본값 60Hz
+                // DrawingSurface의 크기 보내기
+                val drawWidth = drawingSurface.width
+                val drawHeight = drawingSurface.height
+                val refreshRate = this@MainActivity.display.refreshRate.toInt()
 
-                val deviceInfo = "DEVICEINFO:$width,$height,$refreshRate"
+                val deviceInfo = "DEVICEINFO:$drawWidth,$drawHeight,$refreshRate"
                 writer?.println(deviceInfo)
 
                 withContext(Dispatchers.Main) {
