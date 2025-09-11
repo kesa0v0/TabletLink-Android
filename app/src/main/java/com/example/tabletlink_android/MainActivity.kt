@@ -2,7 +2,10 @@ package com.example.tabletlink_android
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.util.DisplayMetrics
+import android.view.Display
 import android.view.MotionEvent
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -61,6 +64,23 @@ class MainActivity : AppCompatActivity() {
                 socket = Socket()
                 socket?.connect(java.net.InetSocketAddress(ip, PORT), 5000) // 5000ms = 5초 timeout
                 writer = PrintWriter(socket!!.getOutputStream(), true)
+
+                // 디바이스 정보 가져오기
+                val displayMetrics = DisplayMetrics()
+                @Suppress("DEPRECATION") // For older API levels
+                val display: Display? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    getDisplay()
+                } else {
+                    windowManager.defaultDisplay
+                }
+                display?.getRealMetrics(displayMetrics)
+                val width = displayMetrics.widthPixels
+                val height = displayMetrics.heightPixels
+                val refreshRate = display?.refreshRate?.toInt() ?: 60 // 기본값 60Hz
+
+                val deviceInfo = "DEVICEINFO:$width,$height,$refreshRate"
+                writer?.println(deviceInfo)
+
                 withContext(Dispatchers.Main) {
                     statusText.text = "연결됨: $ip"
                 }
