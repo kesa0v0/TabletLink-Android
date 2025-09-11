@@ -1,12 +1,8 @@
 package com.example.tabletlink_android
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.os.Bundle
-import android.util.DisplayMetrics
-import android.view.Display
 import android.view.MotionEvent
-import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -14,6 +10,9 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.PrintWriter
@@ -32,6 +31,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connectButton: Button
     private lateinit var statusText: TextView
     private lateinit var drawingSurface: FrameLayout
+
+
+    // 데이터 전송을 위한 채널과 작업 Job
+    private val touchDataChannel = Channel<String>(Channel.UNLIMITED) // 버퍼 크기는 상황에 맞게 조절 가능
+    private var senderJob: Job? = null
+
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +63,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectToServer(ip: String) {
+        // 기존 senderJob이 있다면 취소
+        senderJob?.cancel()
+        // 채널도 이전 연결에서 사용되었을 수 있으므로, 새로 만들거나 비우는 것이 안전할 수 있으나,
+        // 여기서는 connectToServer가 호출될 때마다 새 Job을 만들므로 이전 채널 내용을 소비하게 됨.
+        // 만약 이전 채널에 데이터가 남아있으면 새 연결에서 전송될 수 있으니 주의.
+        // 좀 더 견고하게 하려면 채널을 닫고 새로 만들거나 clear 하는 로직이 필요할 수 있음.
+
         // 네트워크 작업은 메인 스레드에서 할 수 없으므로 코루틴 사용
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -74,6 +86,19 @@ class MainActivity : AppCompatActivity() {
                 val deviceInfo = "DEVICEINFO:$drawWidth,$drawHeight,$refreshRate"
                 writer?.println(deviceInfo)
 
+                // 송신자 코루틴 시작
+                senderJob = launch { // 부모 코루틴(Dispatchers.IO)의 컨텍스트를 상속
+                    try {
+                        for (dataString in touchDataChannel) { // 채널에서 데이터를 계속 읽음
+                            if (!isActive || socket?.isClosed == true || writer == null) break // 코루틴/소켓 비활성 시 중단
+                            writer?.println(dataString)
+                        }
+                    } catch (e: Exception) {
+                        // 채널이 닫히거나 전송 중 오류 발생 시
+                        e.printStackTrace()
+                    }
+                }
+
                 withContext(Dispatchers.Main) {
                     statusText.text = "연결됨: $ip"
                 }
@@ -82,6 +107,12 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     statusText.text = "연결 실패: ${e.message}"
                 }
+                // 연결 실패 시 writer, socket 정리
+                writer?.close()
+                socket?.close()
+                writer = null
+                socket = null
+                senderJob?.cancel() // senderJob도 확실히 정리
             }
         }
     }
@@ -93,8 +124,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 연결된 상태일 때만 데이터 전송
-        writer?.let {
+        // senderJob이 활성화 상태이고, writer가 준비된 경우에만 채널로 데이터 전송
+        if (senderJob?.isActive == true && writer != null) {
             val action = when (event.action) {
                 MotionEvent.ACTION_DOWN -> "DOWN"
                 MotionEvent.ACTION_MOVE -> "MOVE"
@@ -107,9 +138,16 @@ class MainActivity : AppCompatActivity() {
 
             val dataString = "$action:$x,$y,$pressure"
 
-            // 데이터 전송도 네트워크 작업이므로 IO 스레드에서 처리
-            lifecycleScope.launch(Dispatchers.IO) {
-                it.println(dataString)
+            // 채널로 데이터 전송 (send는 suspend 함수이므로 코루틴 내에서 호출)
+            // Main 스레드에서 UI 이벤트를 처리하고 빠르게 채널에 넣는 것이 목적이므로
+            // 별도의 디스패처 지정 없이 현재 스코프에서 실행.
+            lifecycleScope.launch {
+                try {
+                    touchDataChannel.send(dataString)
+                } catch (e: Exception) {
+                    // 채널이 닫혔거나 하는 예외 처리
+                    e.printStackTrace()
+                }
             }
         }
     }
@@ -119,6 +157,13 @@ class MainActivity : AppCompatActivity() {
         // 앱 종료 시 소켓 연결 해제
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                // 1. 송신자 코루틴 취소
+                senderJob?.cancel()
+                // 2. 채널 닫기 (송신자 코루틴의 루프를 정상적으로 종료시킴)
+                // 채널을 닫으면 for (data in channel) 루프가 종료됩니다.
+                touchDataChannel.close()
+
+                // 3. writer 및 socket 닫기
                 writer?.close()
                 socket?.close()
             } catch (e: Exception) {
