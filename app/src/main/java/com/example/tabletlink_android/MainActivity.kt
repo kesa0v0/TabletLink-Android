@@ -12,11 +12,16 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.PrintWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -25,9 +30,9 @@ const val TAG = "kesa"
 
 
 class MainActivity : AppCompatActivity() {
-    private val PORT = 54321 // PC 서버와 동일한 포트
-    private var writer: PrintWriter? = null
-    private var socket: Socket? = null
+    private var PORT = 54321 // PC 서버와 동일한 포트
+    private var serverAddress: InetAddress? = null
+    private var socket: DatagramSocket? = null
 
     private lateinit var ipAddressInput: EditText
     private lateinit var connectButton: Button
@@ -38,10 +43,29 @@ class MainActivity : AppCompatActivity() {
     // 데이터 전송을 위한 채널과 작업 Job
     private val touchDataChannel = Channel<String>(Channel.UNLIMITED) // 버퍼 크기는 상황에 맞게 조절 가능
     private var senderJob: Job? = null
+    private var receiverJob: Job? = null
+    private var heartbeatJob: Job? = null
+    private val dataChannel = Channel<ByteArray>(Channel.UNLIMITED)
 
 
-    private var lastSendTime: Long = 0
-    private val SEND_INTERVAL_MS = 8 // ms, 약 125Hz로 전송률 제한
+    // State Management
+    @Volatile
+    private var isConnectionEstablished = false
+    @Volatile
+    private var lastPongReceivedTime: Long = 0
+
+    // Constants
+    companion object {
+        private const val SEND_INTERVAL_MS = 8L // 125Hz
+        private const val HEARTBEAT_INTERVAL_MS = 5000L
+        private const val HEARTBEAT_TIMEOUT_MS = 10000L
+
+        // Packet Types
+        private const val PACKET_TYPE_DEVICE_INFO_REQ: Byte = 255.toByte()
+        private const val PACKET_TYPE_DEVICE_INFO_ACK: Byte = 254.toByte()
+        private const val PACKET_TYPE_HEARTBEAT_PING: Byte = 253.toByte()
+        private const val PACKET_TYPE_HEARTBEAT_PONG: Byte = 252.toByte()
+    }
 
 
     @SuppressLint("ClickableViewAccessibility")
@@ -53,10 +77,12 @@ class MainActivity : AppCompatActivity() {
         connectButton = findViewById(R.id.connectButton)
         statusText = findViewById(R.id.statusText)
         drawingSurface = findViewById(R.id.drawingSurface)
+        drawingSurface.keepScreenOn = true
 
         connectButton.setOnClickListener {
             val ipAddress = ipAddressInput.text.toString()
             if (ipAddress.isNotEmpty()) {
+                statusText.text = "연결 시도 중..."
                 connectToServer(ipAddress)
             }
         }
@@ -75,55 +101,102 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectToServer(ip: String) {
         // 기존 senderJob이 있다면 취소
-        senderJob?.cancel()
-        // 채널도 이전 연결에서 사용되었을 수 있으므로, 새로 만들거나 비우는 것이 안전할 수 있으나,
-        // 여기서는 connectToServer가 호출될 때마다 새 Job을 만들므로 이전 채널 내용을 소비하게 됨.
-        // 만약 이전 채널에 데이터가 남아있으면 새 연결에서 전송될 수 있으니 주의.
-        // 좀 더 견고하게 하려면 채널을 닫고 새로 만들거나 clear 하는 로직이 필요할 수 있음.
+        disconnect()
 
         // 네트워크 작업은 메인 스레드에서 할 수 없으므로 코루틴 사용
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // 소켓을 생성하고 connect 메소드를 사용하여 timeout 설정
-                socket = Socket()
-                socket?.connect(java.net.InetSocketAddress(ip, PORT), 5000) // 5000ms = 5초 timeout
-                writer = PrintWriter(socket!!.getOutputStream(), true)
-
-                // DrawingSurface의 크기 보내기
-                val drawWidth = drawingSurface.width
-                val drawHeight = drawingSurface.height
-                val refreshRate = this@MainActivity.display.refreshRate.toInt()
-
-                val deviceInfo = "DEVICEINFO:$drawWidth,$drawHeight,$refreshRate"
-                writer?.println(deviceInfo)
-
-                // 송신자 코루틴 시작
-                senderJob = launch { // 부모 코루틴(Dispatchers.IO)의 컨텍스트를 상속
-                    try {
-                        for (dataString in touchDataChannel) { // 채널에서 데이터를 계속 읽음
-                            if (!isActive || socket?.isClosed == true || writer == null) break // 코루틴/소켓 비활성 시 중단
-                            writer?.println(dataString)
-                        }
-                    } catch (e: Exception) {
-                        // 채널이 닫히거나 전송 중 오류 발생 시
-                        e.printStackTrace()
-                    }
+                serverAddress = InetAddress.getByName(ip)
+                socket = DatagramSocket().apply {
+                    soTimeout = 2000 // 수신 대기 시간 2초
                 }
 
-                withContext(Dispatchers.Main) {
-                    statusText.text = "연결됨: $ip"
+                // 1. 수신자 코루틴 시작 (Handshake 응답을 받기 위해 먼저 시작)
+                startReceiver()
+
+                // 2. Handshake 시도
+                val handshakeSuccess = performHandshake()
+
+                if (handshakeSuccess) {
+                    isConnectionEstablished = true
+                    lastPongReceivedTime = System.currentTimeMillis()
+                    // 3. Handshake 성공 시 송신자 및 Heartbeat 코루틴 시작
+                    startSender()
+                    startHeartbeat()
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "연결됨: $ip"
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        statusText.text = "연결 실패 (응답 없음)"
+                    }
+                    disconnect()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
-                    statusText.text = "연결 실패: ${e.message}"
+                    statusText.text = "연결 오류: ${e.message}"
                 }
-                // 연결 실패 시 writer, socket 정리
-                writer?.close()
-                socket?.close()
-                writer = null
-                socket = null
-                senderJob?.cancel() // senderJob도 확실히 정리
+                disconnect()
+            }
+        }
+    }
+
+    private suspend fun performHandshake(): Boolean {
+        // drawingSurface의 크기가 측정될 때까지 잠시 대기
+        while (drawingSurface.width == 0 || drawingSurface.height == 0) { delay(100) }
+
+        val deviceInfoPacket = createDeviceInfoPacket(
+            drawingSurface.width,
+            drawingSurface.height,
+            this@MainActivity.display?.refreshRate ?: 60f
+        )
+
+        // 최대 5번, 1초 간격으로 Handshake 시도
+        repeat(5) {
+            val packet =
+                DatagramPacket(deviceInfoPacket, deviceInfoPacket.size, serverAddress, PORT)
+            socket?.send(packet)
+            // ACK 수신 대기 (receiverJob이 처리할 때까지 잠시 기다림)
+            delay(1000)
+            if (isConnectionEstablished) return true
+        }
+        return false
+    }
+
+
+    private fun startReceiver() {
+        receiverJob = lifecycleScope.launch(Dispatchers.IO) {
+            val buffer = ByteArray(16) // 수신할 데이터 버퍼
+            val packet = DatagramPacket(buffer, buffer.size)
+
+            while (isActive) {
+                try {
+                    socket?.receive(packet)
+                    val packetType = buffer[0]
+                    when (packetType) {
+                        PACKET_TYPE_DEVICE_INFO_ACK -> {
+                            isConnectionEstablished = true
+                        }
+                        PACKET_TYPE_HEARTBEAT_PONG -> {
+                            lastPongReceivedTime = System.currentTimeMillis()
+                        }
+                    }
+                } catch (e: SocketTimeoutException) {
+                    // 타임아웃은 정상적인 상황일 수 있으므로 무시
+                } catch (e: Exception) {
+                    if (isActive) e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun startSender() {
+        senderJob = lifecycleScope.launch(Dispatchers.IO) {
+            for (data in dataChannel) {
+                if (!isActive) break
+                val packet = DatagramPacket(data, data.size, serverAddress, PORT)
+                socket?.send(packet)
             }
         }
     }
@@ -188,5 +261,9 @@ class MainActivity : AppCompatActivity() {
                 e.printStackTrace()
             }
         }
+    }
+
+    private fun disconnect() {
+        TODO("Not yet implemented")
     }
 }
