@@ -17,6 +17,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.PrintWriter
 import java.net.Socket
+import kotlin.math.cos
+import kotlin.math.sin
 
 
 const val TAG = "kesa"
@@ -36,6 +38,10 @@ class MainActivity : AppCompatActivity() {
     // 데이터 전송을 위한 채널과 작업 Job
     private val touchDataChannel = Channel<String>(Channel.UNLIMITED) // 버퍼 크기는 상황에 맞게 조절 가능
     private var senderJob: Job? = null
+
+
+    private var lastSendTime: Long = 0
+    private val SEND_INTERVAL_MS = 8 // ms, 약 125Hz로 전송률 제한
 
 
     @SuppressLint("ClickableViewAccessibility")
@@ -59,6 +65,11 @@ class MainActivity : AppCompatActivity() {
         drawingSurface.setOnTouchListener { _, event ->
             handleTouchEvent(event)
             true // 이벤트를 소비했음을 알림
+        }
+
+        drawingSurface.setOnHoverListener { _, event ->
+            handleTouchEvent(event)
+            true
         }
     }
 
@@ -126,15 +137,22 @@ class MainActivity : AppCompatActivity() {
 
         // senderJob이 활성화 상태이고, writer가 준비된 경우에만 채널로 데이터 전송
         if (senderJob?.isActive == true && writer != null) {
-            val action = when (event.action) {
-                MotionEvent.ACTION_DOWN -> "DOWN"
-                MotionEvent.ACTION_MOVE -> "MOVE"
-                MotionEvent.ACTION_UP -> "UP"
-                else -> return
-            }
+            val action = event.actionMasked
             val x = event.x
             val y = event.y
             val pressure = event.pressure // 필압 정보
+
+            // S펜 옆 버튼(배럴 버튼) 감지
+            val isBarrelPressed = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+
+            // 기울기(Tilt) 및 방향(Orientation/Azimuth) 값 추출
+            val tilt = event.getAxisValue(MotionEvent.AXIS_TILT) // 0 to PI/2 radians
+            val orientation = event.getAxisValue(MotionEvent.AXIS_ORIENTATION) // -PI to PI radians
+
+            // Tilt와 Orientation을 사용하여 TiltX, TiltY 계산 (각도로 변환)
+            val tiltDegrees = Math.toDegrees(tilt.toDouble()).toInt()
+            val tiltX = (tiltDegrees * sin(orientation)).toInt()
+            val tiltY = (tiltDegrees * cos(orientation)).toInt()
 
             val dataString = "$action:$x,$y,$pressure"
 
