@@ -1,7 +1,6 @@
 package com.example.tabletlink_android
 
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -9,9 +8,17 @@ import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/**
+ * Manages UDP communication with the Windows server, including connection,
+ * data transmission, and connection health monitoring (heartbeat).
+ *
+ * @param scope The CoroutineScope to launch background tasks (e.g., from lifecycleScope).
+ */
 class NetworkManager(private val scope: CoroutineScope) {
 
-    // MainActivity와 통신하기 위한 리스너 인터페이스
+    /**
+     * Interface for communicating network state changes back to the UI.
+     */
     interface NetworkListener {
         fun onConnectionSuccess(ip: String)
         fun onConnectionFailed(message: String)
@@ -22,88 +29,116 @@ class NetworkManager(private val scope: CoroutineScope) {
     private var serverAddress: InetAddress? = null
     private var listener: NetworkListener? = null
 
-    // Coroutine Jobs
-    private var senderJob: Job? = null
+    // Coroutine Jobs for managing concurrent tasks.
     private var receiverJob: Job? = null
     private var heartbeatJob: Job? = null
-    private val dataChannel = Channel<ByteArray>(Channel.UNLIMITED)
 
-    // State Management
     @Volatile
     private var isConnectionEstablished = false
     @Volatile
     private var lastPongReceivedTime: Long = 0
 
-    // Constants
     companion object {
         private const val PORT = 9999
-        private const val HEARTBEAT_INTERVAL_MS = 5000L
+        private const val HEARTBEAT_INTERVAL_MS = 3000L
         private const val HEARTBEAT_TIMEOUT_MS = 10000L
+        private const val HANDSHAKE_TIMEOUT_MS = 2000
+        private const val HANDSHAKE_RETRIES = 5
 
-        // Packet Types
-        private const val PACKET_TYPE_DEVICE_INFO_REQ: Byte = 255.toByte()
-        private const val PACKET_TYPE_DEVICE_INFO_ACK: Byte = 254.toByte()
-        private const val PACKET_TYPE_HEARTBEAT_PING: Byte = 253.toByte()
-        private const val PACKET_TYPE_HEARTBEAT_PONG: Byte = 252.toByte()
+        // Packet type constants must match the server implementation.
+        private const val PACKET_TYPE_DEVICE_INFO_REQ: Byte = -1 // 255
+        private const val PACKET_TYPE_DEVICE_INFO_ACK: Byte = -2 // 254
+        private const val PACKET_TYPE_HEARTBEAT_PING: Byte = -3 // 253
+        private const val PACKET_TYPE_HEARTBEAT_PONG: Byte = -4 // 252
     }
 
+    /**
+     * Attempts to connect to the server.
+     * This involves a handshake process and starting background jobs for sending,
+     * receiving, and heartbeat monitoring.
+     */
     fun connect(ip: String, deviceInfo: DeviceInfo, listener: NetworkListener) {
         this.listener = listener
-        disconnect() // 기존 연결 정리
+        // If a previous connection job is active, disconnect first.
+        if (receiverJob?.isActive == true || heartbeatJob?.isActive == true) {
+            disconnect()
+        }
 
         scope.launch(Dispatchers.IO) {
             try {
                 serverAddress = InetAddress.getByName(ip)
-                udpSocket = DatagramSocket().apply { soTimeout = 2000 }
+                udpSocket = DatagramSocket().apply { soTimeout = HANDSHAKE_TIMEOUT_MS }
 
-                startReceiver()
+                startReceiver() // Start listening for ACK immediately.
                 val handshakeSuccess = performHandshake(deviceInfo)
 
                 if (handshakeSuccess) {
-                    isConnectionEstablished = true
-                    lastPongReceivedTime = System.currentTimeMillis()
-                    startSender()
-                    startHeartbeat()
                     withContext(Dispatchers.Main) { listener.onConnectionSuccess(ip) }
+                    startHeartbeat()
                 } else {
-                    withContext(Dispatchers.Main) { listener.onConnectionFailed("응답 없음") }
+                    withContext(Dispatchers.Main) { listener.onConnectionFailed("Server not responding") }
                     disconnect()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                withContext(Dispatchers.Main) { listener.onConnectionFailed(e.message ?: "알 수 없는 오류") }
+                withContext(Dispatchers.Main) { listener.onConnectionFailed(e.message ?: "Unknown error") }
                 disconnect()
             }
         }
     }
 
+    /**
+     * Closes the socket and cancels all running coroutines.
+     */
     fun disconnect() {
         isConnectionEstablished = false
-        senderJob?.cancel()
+        // Cancel jobs in a non-blocking way.
         receiverJob?.cancel()
         heartbeatJob?.cancel()
         udpSocket?.close()
-        while(dataChannel.tryReceive().isSuccess) { } // 채널 비우기
     }
 
+    /**
+     * Sends pen data to the server in a new background task to minimize latency.
+     * @param data The raw byte array packet to send.
+     */
     fun sendPenData(data: ByteArray) {
         if (!isConnectionEstablished) return
-        scope.launch {
-            dataChannel.send(data)
+
+        // Launch a new coroutine for each packet to send it immediately
+        // without waiting for a channel or a single sender loop.
+        // This can help reduce latency for real-time data.
+        // 실시간 데이터 지연을 줄이기 위해, 채널을 거치지 않고 각 패킷을 즉시 전송합니다.
+        scope.launch(Dispatchers.IO) {
+            try {
+                val packet = DatagramPacket(data, data.size, serverAddress, PORT)
+                udpSocket?.send(packet)
+            } catch (e: Exception) {
+                // Log error only if the coroutine scope is still active
+                if (isActive) {
+                    e.printStackTrace()
+                }
+            }
         }
     }
 
+    /**
+     * Sends a device info packet repeatedly and waits for an ACK from the server.
+     */
     private suspend fun performHandshake(deviceInfo: DeviceInfo): Boolean {
         val deviceInfoPacket = createDeviceInfoPacket(deviceInfo)
-        repeat(5) {
+        repeat(HANDSHAKE_RETRIES) {
+            if (isConnectionEstablished) return true
             val packet = DatagramPacket(deviceInfoPacket, deviceInfoPacket.size, serverAddress, PORT)
             udpSocket?.send(packet)
-            delay(1000)
-            if (isConnectionEstablished) return true
+            delay(500)
         }
-        return false
+        return isConnectionEstablished
     }
 
+    /**
+     * Starts a coroutine to continuously listen for incoming packets from the server.
+     */
     private fun startReceiver() {
         receiverJob = scope.launch(Dispatchers.IO) {
             val buffer = ByteArray(16)
@@ -113,36 +148,39 @@ class NetworkManager(private val scope: CoroutineScope) {
                 try {
                     udpSocket?.receive(packet)
                     when (buffer[0]) {
-                        PACKET_TYPE_DEVICE_INFO_ACK -> isConnectionEstablished = true
-                        PACKET_TYPE_HEARTBEAT_PONG -> lastPongReceivedTime = System.currentTimeMillis()
+                        PACKET_TYPE_DEVICE_INFO_ACK -> {
+                            if (!isConnectionEstablished) {
+                                isConnectionEstablished = true
+                                lastPongReceivedTime = System.currentTimeMillis()
+                            }
+                        }
+                        PACKET_TYPE_HEARTBEAT_PONG -> {
+                            lastPongReceivedTime = System.currentTimeMillis()
+                        }
                     }
-                } catch (e: SocketTimeoutException) {
-                    // Ignore
+                } catch (_: SocketTimeoutException) {
+                    // Timeout is expected, continue loop.
                 } catch (e: Exception) {
-                    if (isActive) e.printStackTrace()
+                    if (isActive) e.printStackTrace() // Don't log errors if job is cancelled.
                 }
             }
         }
     }
 
-    private fun startSender() {
-        senderJob = scope.launch(Dispatchers.IO) {
-            for (data in dataChannel) {
-                if (!isActive) break
-                val packet = DatagramPacket(data, data.size, serverAddress, PORT)
-                udpSocket?.send(packet)
-            }
-        }
-    }
-
+    /**
+     * Starts a coroutine to periodically send PING packets and check for PONG responses
+     * to ensure the connection is still alive.
+     */
     private fun startHeartbeat() {
         heartbeatJob = scope.launch(Dispatchers.IO) {
             while(isActive) {
                 delay(HEARTBEAT_INTERVAL_MS)
+                if (!isConnectionEstablished) continue
+
                 if (System.currentTimeMillis() - lastPongReceivedTime > HEARTBEAT_TIMEOUT_MS) {
-                    withContext(Dispatchers.Main) { listener?.onConnectionLost("타임아웃") }
+                    withContext(Dispatchers.Main) { listener?.onConnectionLost("Connection timed out") }
                     disconnect()
-                    break
+                    break // Exit heartbeat loop.
                 } else {
                     val pingPacket = createControlPacket(PACKET_TYPE_HEARTBEAT_PING)
                     val packet = DatagramPacket(pingPacket, pingPacket.size, serverAddress, PORT)
@@ -165,3 +203,4 @@ class NetworkManager(private val scope: CoroutineScope) {
 
     data class DeviceInfo(val width: Int, val height: Int, val refreshRate: Float)
 }
+
