@@ -2,6 +2,8 @@ package com.example.tabletlink_android
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.util.Log
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.widget.Button
 import android.widget.EditText
@@ -14,17 +16,21 @@ import java.nio.ByteOrder
 import kotlin.math.cos
 import kotlin.math.sin
 
+
 class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
     private lateinit var ipAddressInput: EditText
     private lateinit var connectButton: Button
     private lateinit var statusText: TextView
     private lateinit var drawingSurface: FrameLayout
 
+
     private lateinit var networkManager: NetworkManager
 
+
     private var lastSendTime: Long = 0
-    // Throttle move events to ~125Hz (1000ms / 8ms) to avoid network flooding.
-    private val sendIntervalMs = 8L
+    private val SEND_INTERVAL_MS = 8L // 125Hz
+    private val TAG = "TabletLink"
+
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,10 +46,9 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
         networkManager = NetworkManager(lifecycleScope)
 
         connectButton.setOnClickListener {
-            val ipAddress = ipAddressInput.text.toString().trim()
+            val ipAddress = ipAddressInput.text.toString()
             if (ipAddress.isNotEmpty()) {
                 statusText.text = "Connecting..."
-                // Use post to ensure the view has been laid out and has dimensions.
                 drawingSurface.post {
                     val deviceInfo = NetworkManager.DeviceInfo(
                         drawingSurface.width,
@@ -55,79 +60,88 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
             }
         }
 
-        drawingSurface.setOnTouchListener { _, event -> handleStylusEvent(event) }
-        drawingSurface.setOnHoverListener { _, event -> handleStylusEvent(event) }
-    }
-
-    /**
-     * Handles both touch and hover events, filtering for stylus input.
-     * @return True if the event was handled, false otherwise.
-     */
-    private fun handleStylusEvent(event: MotionEvent): Boolean {
-        // Only process events from a stylus tool.
-        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) {
-            return false
+        // --- FIX: Revised listener setup to better capture events before system interception ---
+        // 터치(화면 접촉) 이벤트를 처리합니다.
+        drawingSurface.setOnTouchListener { _, event ->
+            // Log every touch event that the listener receives
+            Log.d(TAG, "onTouch Event -> ${MotionEvent.actionToString(event.actionMasked)}")
+            handleTouchEvent(event)
+            true // Return true to consume the event and prevent further processing
         }
 
+        // 호버링, 스타일러스 버튼 등 터치가 아닌 모든 모션 이벤트를 처리합니다.
+        // This is the correct listener for hover and stylus button events.
+        drawingSurface.setOnGenericMotionListener { _, event ->
+            // Log every generic motion event
+            Log.d(TAG, "onGenericMotion Event -> ${MotionEvent.actionToString(event.actionMasked)}")
+            // Ensure the event is from a stylus before processing
+            if (event.isFromSource(InputDevice.SOURCE_STYLUS)) {
+                handleTouchEvent(event)
+                return@setOnGenericMotionListener true // Consume the event
+            }
+            false
+        }
+    }
+
+    private fun handleTouchEvent(event: MotionEvent) {
+        val toolType = event.getToolType(0)
+        if (toolType != MotionEvent.TOOL_TYPE_STYLUS) {
+            return
+        }
         val currentTime = System.currentTimeMillis()
         val action = event.actionMasked
 
-        // Throttle move/hover events to prevent flooding the network.
         if ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) &&
-            (currentTime - lastSendTime < sendIntervalMs)) {
-            return true // Event consumed, but not sent.
+            (currentTime - lastSendTime < SEND_INTERVAL_MS)
+        ) {
+            return
         }
 
-        val penAction = when (action) {
-            MotionEvent.ACTION_DOWN -> PenAction.DOWN
-            MotionEvent.ACTION_MOVE -> PenAction.MOVE
-            MotionEvent.ACTION_UP -> PenAction.UP
-            MotionEvent.ACTION_HOVER_MOVE -> PenAction.HOVER
-            else -> null // Ignore other actions like POINTER_UP/DOWN, HOVER_ENTER/EXIT etc.
+        val x = event.x
+        val y = event.y
+        val pressure = event.pressure
+        val isBarrelPressed = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val tilt = Math.toDegrees(event.getAxisValue(MotionEvent.AXIS_TILT).toDouble()).toInt()
+        val orientation = event.getAxisValue(MotionEvent.AXIS_ORIENTATION)
+        val tiltX = (tilt * sin(orientation)).toInt()
+        val tiltY = (tilt * cos(orientation)).toInt()
+
+        // --- FIX: Expanded to handle more event types just in case ---
+        val actionType = when (action) {
+            MotionEvent.ACTION_DOWN -> 0         // Pen touches screen
+            MotionEvent.ACTION_MOVE -> 1         // Pen moves on screen
+            MotionEvent.ACTION_UP -> 2           // Pen lifts from screen
+            MotionEvent.ACTION_HOVER_ENTER,
+            MotionEvent.ACTION_HOVER_MOVE,
+            MotionEvent.ACTION_HOVER_EXIT -> 3   // All hover events
+            MotionEvent.ACTION_BUTTON_PRESS,
+            MotionEvent.ACTION_BUTTON_RELEASE -> 3 // Treat button presses as hover updates
+            else -> -1
         }
 
-        penAction?.let {
-            val isBarrelPressed = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-
-            // Tilt is reported in radians from the vertical axis.
-            val tilt = event.getAxisValue(MotionEvent.AXIS_TILT)
-            // Orientation is the clockwise angle of the pen from the vertical axis.
-            val orientation = event.getAxisValue(MotionEvent.AXIS_ORIENTATION)
-
-            // Decompose tilt and orientation into X and Y components.
-            // Tilt is 0 when perpendicular, PI/2 when parallel. We convert to degrees from -90 to 90.
-            val tiltDegrees = Math.toDegrees(tilt.toDouble())
-            val tiltX = (tiltDegrees * sin(orientation)).toInt()
-            val tiltY = (tiltDegrees * cos(orientation)).toInt()
-
-            val packetData = createPenDataPacket(
-                action = it.id,
-                x = event.x,
-                y = event.y,
-                pressure = event.pressure,
-                isBarrelPressed = isBarrelPressed,
-                tiltX = tiltX,
-                tiltY = tiltY
-            )
+        if (actionType != -1) {
+            Log.d(TAG, "Sending -> Action: $actionType, X: ${"%.2f".format(x)}, Y: ${"%.2f".format(y)}, P: ${"%.2f".format(pressure)}, Barrel: $isBarrelPressed, TiltX: $tiltX, TiltY: $tiltY")
+            val packetData =
+                createPenDataPacket(actionType, x, y, pressure, isBarrelPressed, tiltX, tiltY)
             networkManager.sendPenData(packetData)
             lastSendTime = currentTime
         }
-
-        return true
     }
 
-    /**
-     * Creates the 17-byte data packet to be sent over UDP.
-     * The structure must match the C# receiver's parsing logic.
-     */
-    private fun createPenDataPacket(action: Int, x: Float, y: Float, pressure: Float, isBarrelPressed: Boolean, tiltX: Int, tiltY: Int): ByteArray {
+    private fun createPenDataPacket(
+        action: Int,
+        x: Float,
+        y: Float,
+        pressure: Float,
+        isBarrelPressed: Boolean,
+        tiltX: Int,
+        tiltY: Int
+    ): ByteArray {
         val buffer = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
-
         var actionAndFlags = action.toByte()
         if (isBarrelPressed) {
-            actionAndFlags = (actionAndFlags.toInt() or (1 shl 4)).toByte() // Set the 5th bit
+            actionAndFlags = (actionAndFlags.toInt() or (1 shl 4)).toByte()
         }
-
         buffer.put(actionAndFlags)
         buffer.putFloat(x)
         buffer.putFloat(y)
@@ -137,14 +151,15 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
         return buffer.array()
     }
 
+
     override fun onDestroy() {
         super.onDestroy()
         networkManager.disconnect()
     }
 
-    // region NetworkManager.NetworkListener Implementation
+    // NetworkManager.NetworkListener implementation
     override fun onConnectionSuccess(ip: String) {
-        statusText.text = "Connected to: $ip"
+        statusText.text = "Connected: $ip"
     }
 
     override fun onConnectionFailed(message: String) {
@@ -154,12 +169,5 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
     override fun onConnectionLost(message: String) {
         statusText.text = "Connection Lost: $message"
     }
-    // endregion
-
-    private enum class PenAction(val id: Int) {
-        DOWN(0),
-        MOVE(1),
-        UP(2),
-        HOVER(3)
-    }
 }
+
