@@ -60,34 +60,27 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
             }
         }
 
-        // --- FIX: Revised listener setup to better capture events before system interception ---
-        // 터치(화면 접촉) 이벤트를 처리합니다.
+        // This listener handles events when the stylus is in contact with the screen.
         drawingSurface.setOnTouchListener { _, event ->
-            // Log every touch event that the listener receives
-            Log.d(TAG, "onTouch Event -> ${MotionEvent.actionToString(event.actionMasked)}")
+            Log.d(TAG, "onTouch Event -> ${MotionEvent.actionToString(event.actionMasked)} (${event.action})")
             handleTouchEvent(event)
-            true // Return true to consume the event and prevent further processing
+            true
         }
 
-        // 호버링, 스타일러스 버튼 등 터치가 아닌 모든 모션 이벤트를 처리합니다.
-        // This is the correct listener for hover and stylus button events.
+        // This listener handles events when the stylus is NOT in contact (hovering, button presses in air).
         drawingSurface.setOnGenericMotionListener { _, event ->
-            // Log every generic motion event
             Log.d(TAG, "onGenericMotion Event -> ${MotionEvent.actionToString(event.actionMasked)}")
-            // Ensure the event is from a stylus before processing
             if (event.isFromSource(InputDevice.SOURCE_STYLUS)) {
                 handleTouchEvent(event)
-                return@setOnGenericMotionListener true // Consume the event
+                return@setOnGenericMotionListener true
             }
             false
         }
     }
 
     private fun handleTouchEvent(event: MotionEvent) {
-        val toolType = event.getToolType(0)
-        if (toolType != MotionEvent.TOOL_TYPE_STYLUS) {
-            return
-        }
+        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return
+
         val currentTime = System.currentTimeMillis()
         val action = event.actionMasked
 
@@ -106,26 +99,28 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
         val tiltX = (tilt * sin(orientation)).toInt()
         val tiltY = (tilt * cos(orientation)).toInt()
 
-        // --- FIX: Expanded to handle more event types just in case ---
+        // --- FIX: Simplify action determination based on physical state ---
+        // This logic is more robust than checking for specific, sometimes non-standard, event codes.
         val actionType = when (action) {
-            MotionEvent.ACTION_DOWN -> 0         // Pen touches screen
-            MotionEvent.ACTION_MOVE -> 1         // Pen moves on screen
-            MotionEvent.ACTION_UP -> 2           // Pen lifts from screen
-            MotionEvent.ACTION_HOVER_ENTER,
-            MotionEvent.ACTION_HOVER_MOVE,
-            MotionEvent.ACTION_HOVER_EXIT -> 3   // All hover events
-            MotionEvent.ACTION_BUTTON_PRESS,
-            MotionEvent.ACTION_BUTTON_RELEASE -> 3 // Treat button presses as hover updates
-            else -> -1
+            // Pen touches the screen for the first time.
+            MotionEvent.ACTION_DOWN -> 0
+
+            // Pen is lifted from the screen.
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> 2
+
+            // Pen is moving while touching the screen.
+            // We now treat ANY other touch event as a MOVE, catching the unusual barrel+touch events (like 213).
+            MotionEvent.ACTION_MOVE -> 1
+
+            // All other non-contact events (hovering, button presses in air) are treated as hover updates.
+            else -> 3
         }
 
-        if (actionType != -1) {
-            Log.d(TAG, "Sending -> Action: $actionType, X: ${"%.2f".format(x)}, Y: ${"%.2f".format(y)}, P: ${"%.2f".format(pressure)}, Barrel: $isBarrelPressed, TiltX: $tiltX, TiltY: $tiltY")
-            val packetData =
-                createPenDataPacket(actionType, x, y, pressure, isBarrelPressed, tiltX, tiltY)
-            networkManager.sendPenData(packetData)
-            lastSendTime = currentTime
-        }
+        Log.d(TAG, "Sending -> Action: $actionType, X: ${"%.2f".format(x)}, Y: ${"%.2f".format(y)}, P: ${"%.2f".format(pressure)}, Barrel: $isBarrelPressed, TiltX: $tiltX, TiltY: $tiltY")
+        val packetData =
+            createPenDataPacket(actionType, x, y, pressure, isBarrelPressed, tiltX, tiltY)
+        networkManager.sendPenData(packetData)
+        lastSendTime = currentTime
     }
 
     private fun createPenDataPacket(
