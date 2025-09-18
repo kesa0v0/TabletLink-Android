@@ -1,5 +1,7 @@
 package com.example.tabletlink_android
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -23,6 +25,7 @@ class NetworkManager(private val scope: CoroutineScope) {
         fun onConnectionSuccess(ip: String)
         fun onConnectionFailed(message: String)
         fun onConnectionLost(message: String)
+        fun onScreenFrameReceived(bitmap: Bitmap)
     }
 
     private var udpSocket: DatagramSocket? = null
@@ -32,6 +35,7 @@ class NetworkManager(private val scope: CoroutineScope) {
     // Coroutine Jobs for managing concurrent tasks.
     private var receiverJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var screenReceiverJob: Job? = null
 
     @Volatile
     private var isConnectionEstablished = false
@@ -39,7 +43,8 @@ class NetworkManager(private val scope: CoroutineScope) {
     private var lastPongReceivedTime: Long = 0
 
     companion object {
-        private const val PORT = 9999
+        private const val PEN_PORT = 9999
+        private const val SCREEN_PORT = 8080
         private const val HEARTBEAT_INTERVAL_MS = 3000L
         private const val HEARTBEAT_TIMEOUT_MS = 10000L
         private const val HANDSHAKE_TIMEOUT_MS = 2000
@@ -67,9 +72,12 @@ class NetworkManager(private val scope: CoroutineScope) {
         scope.launch(Dispatchers.IO) {
             try {
                 serverAddress = InetAddress.getByName(ip)
+                if (ip == "127.0.0.1") {
+                    serverAddress = InetAddress.getByName("127.0.0.1")
+                }
+
                 udpSocket = DatagramSocket().apply { soTimeout = HANDSHAKE_TIMEOUT_MS }
 
-                startReceiver() // Start listening for ACK immediately.
                 val handshakeSuccess = performHandshake(deviceInfo)
 
                 if (handshakeSuccess) {
@@ -95,6 +103,7 @@ class NetworkManager(private val scope: CoroutineScope) {
         // Cancel jobs in a non-blocking way.
         receiverJob?.cancel()
         heartbeatJob?.cancel()
+        screenReceiverJob?.cancel()
         udpSocket?.close()
     }
 
@@ -111,7 +120,7 @@ class NetworkManager(private val scope: CoroutineScope) {
         // 실시간 데이터 지연을 줄이기 위해, 채널을 거치지 않고 각 패킷을 즉시 전송합니다.
         scope.launch(Dispatchers.IO) {
             try {
-                val packet = DatagramPacket(data, data.size, serverAddress, PORT)
+                val packet = DatagramPacket(data, data.size, serverAddress, PEN_PORT)
                 udpSocket?.send(packet)
             } catch (e: Exception) {
                 // Log error only if the coroutine scope is still active
@@ -127,42 +136,66 @@ class NetworkManager(private val scope: CoroutineScope) {
      */
     private suspend fun performHandshake(deviceInfo: DeviceInfo): Boolean {
         val deviceInfoPacket = createDeviceInfoPacket(deviceInfo)
+
+        val handshakeListenerJob = scope.launch {
+            val buffer = ByteArray(16)
+            val packet = DatagramPacket(buffer, buffer.size)
+            try {
+                while(isActive && !isConnectionEstablished) {
+                    udpSocket?.receive(packet)
+                    if (buffer[0] == PACKET_TYPE_DEVICE_INFO_ACK) {
+                        isConnectionEstablished = true
+                        lastPongReceivedTime = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: SocketTimeoutException) {
+                // This is expected
+            } catch (e: Exception) {
+                if(isActive) e.printStackTrace()
+            }
+        }
+
+        var success = false
         repeat(HANDSHAKE_RETRIES) {
-            if (isConnectionEstablished) return true
-            val packet = DatagramPacket(deviceInfoPacket, deviceInfoPacket.size, serverAddress, PORT)
+            if (isConnectionEstablished) {
+                success = true
+                return@repeat
+            }
+            val packet = DatagramPacket(deviceInfoPacket, deviceInfoPacket.size, serverAddress, PEN_PORT)
             udpSocket?.send(packet)
             delay(500)
         }
-        return isConnectionEstablished
+
+        handshakeListenerJob.cancelAndJoin()
+        return success
     }
 
     /**
      * Starts a coroutine to continuously listen for incoming packets from the server.
      */
-    private fun startReceiver() {
-        receiverJob = scope.launch(Dispatchers.IO) {
-            val buffer = ByteArray(16)
-            val packet = DatagramPacket(buffer, buffer.size)
+    private fun startScreenReceiver() {
+        screenReceiverJob = scope.launch(Dispatchers.IO) {
+            var screenSocket: DatagramSocket? = null
+            try {
+                screenSocket = DatagramSocket(SCREEN_PORT)
+                val buffer = ByteArray(65507) // Max UDP packet size
+                val packet = DatagramPacket(buffer, buffer.size)
 
-            while (isActive) {
-                try {
-                    udpSocket?.receive(packet)
-                    when (buffer[0]) {
-                        PACKET_TYPE_DEVICE_INFO_ACK -> {
-                            if (!isConnectionEstablished) {
-                                isConnectionEstablished = true
-                                lastPongReceivedTime = System.currentTimeMillis()
-                            }
-                        }
-                        PACKET_TYPE_HEARTBEAT_PONG -> {
-                            lastPongReceivedTime = System.currentTimeMillis()
+                while (isActive) {
+                    screenSocket.receive(packet)
+                    val bitmap = BitmapFactory.decodeByteArray(packet.data, 0, packet.length)
+                    if (bitmap != null) {
+                        withContext(Dispatchers.Main) {
+                            listener?.onScreenFrameReceived(bitmap)
                         }
                     }
-                } catch (_: SocketTimeoutException) {
-                    // Timeout is expected, continue loop.
-                } catch (e: Exception) {
-                    if (isActive) e.printStackTrace() // Don't log errors if job is cancelled.
                 }
+            } catch (e: Exception) {
+                if (isActive) {
+                    e.printStackTrace()
+                }
+            } finally {
+                screenSocket?.close()
             }
         }
     }
@@ -183,7 +216,7 @@ class NetworkManager(private val scope: CoroutineScope) {
                     break // Exit heartbeat loop.
                 } else {
                     val pingPacket = createControlPacket(PACKET_TYPE_HEARTBEAT_PING)
-                    val packet = DatagramPacket(pingPacket, pingPacket.size, serverAddress, PORT)
+                    val packet = DatagramPacket(pingPacket, pingPacket.size, serverAddress, PEN_PORT)
                     udpSocket?.send(packet)
                 }
             }

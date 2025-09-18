@@ -1,6 +1,7 @@
 package com.example.tabletlink_android
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
 import android.view.InputDevice
@@ -12,6 +13,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -31,6 +33,7 @@ import kotlin.math.sin
 class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
     private lateinit var fabSettings: FloatingActionButton
     private lateinit var drawingSurface: FrameLayout
+    private lateinit var screenView: ImageView
     private lateinit var networkManager: NetworkManager
 
     // Views within the settings dialog
@@ -71,6 +74,7 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
 
         fabSettings = findViewById(R.id.fab_settings)
         drawingSurface = findViewById(R.id.drawingSurface)
+        screenView = findViewById(R.id.screenView)
         drawingSurface.keepScreenOn = true
 
         networkManager = NetworkManager(lifecycleScope)
@@ -92,6 +96,10 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
             }
             false
         }
+    }
+
+    override fun onScreenFrameReceived(bitmap: Bitmap) {
+        screenView.setImageBitmap(bitmap)
     }
 
     @SuppressLint("ClickableViewAccessibility")
