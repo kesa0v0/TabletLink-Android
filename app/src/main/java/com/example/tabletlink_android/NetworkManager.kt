@@ -2,6 +2,7 @@ package com.example.tabletlink_android
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -44,7 +45,7 @@ class NetworkManager(private val scope: CoroutineScope) {
 
     companion object {
         private const val PEN_PORT = 9999
-        private const val SCREEN_PORT = 8080
+        private const val SCREEN_PORT = 9998
         private const val HEARTBEAT_INTERVAL_MS = 3000L
         private const val HEARTBEAT_TIMEOUT_MS = 10000L
         private const val HANDSHAKE_TIMEOUT_MS = 2000
@@ -72,16 +73,14 @@ class NetworkManager(private val scope: CoroutineScope) {
         scope.launch(Dispatchers.IO) {
             try {
                 serverAddress = InetAddress.getByName(ip)
-                if (ip == "127.0.0.1") {
-                    serverAddress = InetAddress.getByName("127.0.0.1")
-                }
-
-                udpSocket = DatagramSocket().apply { soTimeout = HANDSHAKE_TIMEOUT_MS }
+                udpSocket = DatagramSocket() // 포트 지정 없이 생성
+                udpSocket?.soTimeout = HANDSHAKE_TIMEOUT_MS
 
                 val handshakeSuccess = performHandshake(deviceInfo)
 
                 if (handshakeSuccess) {
                     withContext(Dispatchers.Main) { listener.onConnectionSuccess(ip) }
+                    startScreenReceiver()
                     startHeartbeat()
                 } else {
                     withContext(Dispatchers.Main) { listener.onConnectionFailed("Server not responding") }
@@ -100,11 +99,11 @@ class NetworkManager(private val scope: CoroutineScope) {
      */
     fun disconnect() {
         isConnectionEstablished = false
-        // Cancel jobs in a non-blocking way.
         receiverJob?.cancel()
         heartbeatJob?.cancel()
         screenReceiverJob?.cancel()
         udpSocket?.close()
+        Log.d("NetworkManager", "Connection resources released.")
     }
 
     /**
@@ -181,44 +180,62 @@ class NetworkManager(private val scope: CoroutineScope) {
                 val buffer = ByteArray(65507) // Max UDP packet size
                 val packet = DatagramPacket(buffer, buffer.size)
 
+                Log.d("NetworkManager", "Screen receiver started on port $SCREEN_PORT")
                 while (isActive) {
                     screenSocket.receive(packet)
                     val bitmap = BitmapFactory.decodeByteArray(packet.data, 0, packet.length)
                     if (bitmap != null) {
-                        withContext(Dispatchers.Main) {
-                            listener?.onScreenFrameReceived(bitmap)
-                        }
+                        listener?.onScreenFrameReceived(bitmap)
+                    } else {
+                        Log.w("NetworkManager", "Failed to decode received bitmap data.")
                     }
                 }
             } catch (e: Exception) {
                 if (isActive) {
-                    e.printStackTrace()
+                    Log.e("NetworkManager", "Screen receiver error: ${e.message}")
                 }
             } finally {
                 screenSocket?.close()
+                Log.d("NetworkManager", "Screen receiver stopped.")
             }
         }
     }
 
-    /**
-     * Starts a coroutine to periodically send PING packets and check for PONG responses
-     * to ensure the connection is still alive.
-     */
-    private fun startHeartbeat() {
-        heartbeatJob = scope.launch(Dispatchers.IO) {
-            while(isActive) {
-                delay(HEARTBEAT_INTERVAL_MS)
-                if (!isConnectionEstablished) continue
 
-                if (System.currentTimeMillis() - lastPongReceivedTime > HEARTBEAT_TIMEOUT_MS) {
-                    withContext(Dispatchers.Main) { listener?.onConnectionLost("Connection timed out") }
-                    disconnect()
-                    break // Exit heartbeat loop.
-                } else {
-                    val pingPacket = createControlPacket(PACKET_TYPE_HEARTBEAT_PING)
-                    val packet = DatagramPacket(pingPacket, pingPacket.size, serverAddress, PEN_PORT)
-                    udpSocket?.send(packet)
+    private fun startHeartbeat() {
+        // 서버로부터 오는 응답(PONG)을 처리하는 리스너
+        receiverJob = scope.launch(Dispatchers.IO) {
+            val buffer = ByteArray(16)
+            val packet = DatagramPacket(buffer, buffer.size)
+            while(isActive && isConnectionEstablished) {
+                try {
+                    udpSocket?.soTimeout = HEARTBEAT_TIMEOUT_MS.toInt()
+                    udpSocket?.receive(packet)
+                    if (buffer[0] == PACKET_TYPE_HEARTBEAT_PONG) {
+                        lastPongReceivedTime = System.currentTimeMillis()
+                        // Log.d("NetworkManager", "PONG received.")
+                    }
+                } catch (e: SocketTimeoutException) {
+                    // PONG을 제 시간 안에 받지 못함
+                    if (isConnectionEstablished) { // disconnect가 이미 호출되지 않았는지 확인
+                        Log.w("NetworkManager", "Connection timed out.")
+                        withContext(Dispatchers.Main) { listener?.onConnectionLost("연결 시간 초과") }
+                        disconnect()
+                    }
+                } catch(e: Exception) {
+                    if(isActive) e.printStackTrace()
                 }
+            }
+        }
+
+        // 주기적으로 PING을 보내는 잡
+        heartbeatJob = scope.launch(Dispatchers.IO) {
+            while(isActive && isConnectionEstablished) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                val pingPacket = createControlPacket(PACKET_TYPE_HEARTBEAT_PING)
+                val packet = DatagramPacket(pingPacket, pingPacket.size, serverAddress, PEN_PORT)
+                udpSocket?.send(packet)
+                // Log.d("NetworkManager", "PING sent.")
             }
         }
     }

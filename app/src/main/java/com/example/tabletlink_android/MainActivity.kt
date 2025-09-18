@@ -99,7 +99,9 @@ class MainActivity : AppCompatActivity(), NetworkManager.NetworkListener {
     }
 
     override fun onScreenFrameReceived(bitmap: Bitmap) {
-        screenView.setImageBitmap(bitmap)
+        runOnUiThread {
+            screenView.setImageBitmap(bitmap)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
